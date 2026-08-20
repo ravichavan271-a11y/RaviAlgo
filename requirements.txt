@@ -6,6 +6,6 @@ upstox-python-sdk
 smartapi-python
 pytz
 pyotp
-logzero
+logzero==1.7.0
 google-auth
 google-auth-oauthlib
