@@ -1,11 +1,10 @@
+pyotp
+pandas
+pytz
+smartapi-python
 gspread
 oauth2client
-pandas
 requests
 upstox-python-sdk
-smartapi-python
-pytz
-pyotp
-logzero==1.7.0
-google-auth
-google-auth-oauthlib
+Flask
+gunicorn
