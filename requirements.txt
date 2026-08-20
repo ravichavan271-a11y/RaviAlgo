@@ -6,3 +6,4 @@ upstox-python-sdk
 smartapi-python
 pytz
 pyotp
+logzero
