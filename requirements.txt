@@ -1,0 +1,8 @@
+gspread
+oauth2client
+pandas
+requests
+upstox-python-sdk
+smartapi-python
+pytz
+pyotp
