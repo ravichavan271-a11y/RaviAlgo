@@ -7,3 +7,5 @@ smartapi-python
 pytz
 pyotp
 logzero
+google-auth
+google-auth-oauthlib
