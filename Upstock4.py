@@ -7,11 +7,37 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V22 - VOLUME REALTIME + VOL X GREEN ONLY")
+print("FINAL V23 - VOLUME REALTIME + VOL X GREEN ONLY + TELEGRAM ALERT")
 
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg3Yzc4MDhmMTJkZjNjMTA4ZTcwNDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3MjgzMzI4LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODczNDk2MDB9.yIA7n61WfpOKtgFvNCWs1iCUQiyID_ClveSskCjuwT4"
+UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "eyJ0eXAiOiJKV1QiLCJra2V5X2lkIjoic2tfdjEuMCIsImFsZyI6IkhTMjU2In0.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg3Yzc4MDhmMTJkZjNjMTA4ZTcwNDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3MjgzMzI4LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODczNDk2MDB9.yIA7n61WfpOKtgFvNCWs1iCUQiyID_ClveSskCjuwT4")
 SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
+
+# --- TELEGRAM CONFIG ---
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8255515384:AAEREJpnfiMkr3vOjBhgRBgCTZNUbPcpyHI")  # Render Env Variable madhe tak
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7602442830")      # Tujha Chat ID
+
+def send_telegram_alert(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[TELEGRAM SKIP - Token/Chat ID nahi] {message[:100]}")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print(f"✅ TELEGRAM ALERT SENT: {message[:80]}")
+        else:
+            print(f"❌ Telegram Error: {resp.text}")
+    except Exception as e:
+        print(f"❌ Telegram Exception: {e}")
+
+# Alert duplicate roknyasathi
+alerted_symbols = {}  # symbol -> last_status
 
 def parse_date(val):
     if not val: return ""
@@ -249,13 +275,9 @@ def setup_permanent_colors():
     except: pass
     try:
         requests_main = [
-            # STATUS - BREAKOUT GREEN
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "startColumnIndex": 11, "endColumnIndex": 12}], "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": "BREAKOUT"}]}, "format": {"backgroundColor": {"red": 0.0, "green": 0.8, "blue": 0.0}, "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}}}}}, "index": 0}},
-            # STATUS - BREAKDOWN RED
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "startColumnIndex": 11, "endColumnIndex": 12}], "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": "BREAKDOWN"}]}, "format": {"backgroundColor": {"red": 1.0, "green": 0.2, "blue": 0.2}, "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}}}}}, "index": 1}},
-            # VOL X >= 2.0X - DARK GREEN
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=VALUE(SUBSTITUTE(INDIRECT(\"R\"&ROW()&\"C\"&COLUMN(),FALSE),\"X\",\"\"))>=2"}]}, "format": {"backgroundColor": {"red": 0.0, "green": 0.6, "blue": 0.0}, "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}}}}}, "index": 2}},
-            # VOL X >= 1.0X - LIGHT GREEN
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=VALUE(SUBSTITUTE(INDIRECT(\"R\"&ROW()&\"C\"&COLUMN(),FALSE),\"X\",\"\"))>=1"}]}, "format": {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}, "textFormat": {"bold": True}}}}, "index": 3}},
         ]
         sh.batch_update({"requests": requests_main})
@@ -308,11 +330,33 @@ def on_message(message):
             if not ltp and "ltpc" in feed: ltp = feed["ltpc"].get("ltp")
             with lock:
                 if ltp:
+                    prev_status = get_status(instrument_data[ikey])
                     instrument_data[ikey]["ltp"]=float(ltp)
                     pending_updates[ikey]=float(ltp)
-                    st=get_status(instrument_data[ikey])
-                    if st and not instrument_data[ikey]["break_time"]:
+                    new_status=get_status(instrument_data[ikey])
+                    # TELEGRAM ALERT LOGIC - Status badla ki alert
+                    if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
                         instrument_data[ikey]["break_time"]=datetime.now().strftime("%H:%M:%S")
+                    if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
+                        sym = instrument_data[ikey]["symbol"]
+                        # ekach symbol la ekdach alert per status
+                        last_alert = alerted_symbols.get(sym)
+                        if last_alert != new_status:
+                            volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
+                            dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
+                            emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
+                            msg = (
+                                f"{emoji} <b>{new_status} ALERT - {sym}</b> {emoji}\n\n"
+                                f"💰 LTP: {instrument_data[ikey]['ltp']}\n"
+                                f"📈 Change: {instrument_data[ikey]['change']:.2f}%\n"
+                                f"📊 WH: {instrument_data[ikey]['wh']} | WL: {instrument_data[ikey]['wl']}\n"
+                                f"📦 Vol X: {volx:.1f}X | Dist: {dist:.1f}%\n"
+                                f"⏰ Time: {instrument_data[ikey]['break_time']}\n"
+                                f"🔍 Type: {'INDEX' if instrument_data[ikey]['is_index'] else 'STOCK'}"
+                            )
+                            # Telegram async pathav
+                            threading.Thread(target=send_telegram_alert, args=(msg,), daemon=True).start()
+                            alerted_symbols[sym] = new_status
                 if vol is not None:
                     try:
                         v_int = int(float(vol))
@@ -322,7 +366,8 @@ def on_message(message):
         except: pass
 
 def on_open():
-    print("LIVE CONNECTED - V22 GREEN ONLY")
+    print("LIVE CONNECTED - V23 WITH TELEGRAM")
+    send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED</b>\nMarket screener chalu jhala - Breakout alerts active aahet!")
 
 streamer.on("open", on_open)
 streamer.on("message", on_message)
