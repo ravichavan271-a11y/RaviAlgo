@@ -1,3 +1,4 @@
+
 import threading
 import os
 import time
@@ -91,7 +92,7 @@ def run_upstox():
                 time.sleep(60)
                 continue
             if not os.path.exists(TOKEN_FILE):
-                print("⚠ Upstox token nahi, /upstox-login kara.")
+                print("⚠️ Upstox token nahi, /upstox-login kara.")
                 time.sleep(60)
                 continue
             print(">>> Upstock4 9:00 AM CHALU...")
@@ -107,4 +108,3 @@ threading.Thread(target=run_upstox, daemon=True).start()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
- yaat token aani timing donhi che kele aahe na sanga
