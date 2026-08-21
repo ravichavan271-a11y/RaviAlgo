@@ -63,6 +63,13 @@ def home():
     <a href='/upstox-login'><button style='padding:10px 20px;'>Upstox Login Kara</button></a>
     """
 
+@app.route('/ping')
+def ping():
+    from datetime import datetime
+    import pytz
+    IST = pytz.timezone('Asia/Kolkata')
+    return f"PONG - Alive {datetime.now(IST).strftime('%H:%M:%S')}", 200
+
 @app.route('/upstox-login')
 def upstox_login():
     api_key = os.environ.get("UPSTOX_API_KEY")
@@ -129,8 +136,30 @@ def run_upstox():
             print(f"Upstox Error: {e}")
             time.sleep(10)
 
+def keep_alive():
+    while True:
+        try:
+            from datetime import datetime
+            import pytz
+            IST = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(IST)
+            is_market = 0 <= now.weekday() <=4 and 9 <= now.hour < 15 or (now.hour==15 and now.minute<=30)
+            if is_market:
+                try:
+                    import requests
+                    requests.get('https://ravialgo.onrender.com/ping', timeout=10)
+                    print(f'[KeepAlive] Ping {now.strftime("%H:%M")}')
+                except: pass
+            import time
+            time.sleep(600)
+        except Exception as e:
+            print(f'KeepAlive Error {e}')
+            import time
+            time.sleep(60)
+
 threading.Thread(target=run_kavyadarsh, daemon=True).start()
 threading.Thread(target=run_upstox, daemon=True).start()
+threading.Thread(target=keep_alive, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
