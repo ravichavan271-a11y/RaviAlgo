@@ -1,8 +1,9 @@
-
 import threading
 import os
 import time
 import requests
+import json
+import shutil
 from datetime import datetime, timedelta
 import pytz
 from flask import Flask, redirect, request
@@ -10,6 +11,29 @@ from flask import Flask, redirect, request
 app = Flask(__name__)
 TOKEN_FILE = "upstox_token.txt"
 IST = pytz.timezone('Asia/Kolkata')
+
+# --- SECRET FILE SHORTCUT FIX ---
+# 1. Render Secret File (/etc/secrets/service_account.json) varun
+# 2. Kiva Environment Variable (GOOGLE_CREDENTIALS) varun auto file banel
+
+# Option A: Secret File Render cha
+if os.path.exists("/etc/secrets/service_account.json"):
+    try:
+        shutil.copy("/etc/secrets/service_account.json", "service_account.json")
+        print("✅ service_account.json Secret File madhun copy jhala")
+    except Exception as e:
+        print(f"Secret File copy error: {e}")
+
+# Option B: Env Variable madhun
+elif os.environ.get("GOOGLE_CREDENTIALS"):
+    try:
+        creds_content = os.environ.get("GOOGLE_CREDENTIALS")
+        json.loads(creds_content)  # valid JSON check
+        with open("service_account.json", "w") as sf:
+            sf.write(creds_content)
+        print("✅ service_account.json Environment madhun banla")
+    except Exception as e:
+        print(f"GOOGLE_CREDENTIALS Error: {e}")
 
 def is_market_hours():
     now = datetime.now(IST)
@@ -22,7 +46,9 @@ def is_market_hours():
 @app.route('/')
 def home():
     token_exists = os.path.exists(TOKEN_FILE)
+    creds_exists = os.path.exists("service_account.json") or os.path.exists("/etc/secrets/service_account.json")
     token_status = "✅ Token aahe" if token_exists else "❌ Token nahi"
+    creds_status = "✅ Google Creds aahe (Secret File)" if creds_exists else "❌ Google Creds nahi"
     market = "🟢 Market CHALU" if is_market_hours() else "🔴 Market BAND"
     now_str = datetime.now(IST).strftime("%d-%m-%Y %H:%M:%S IST")
     return f"""
@@ -30,6 +56,7 @@ def home():
     <p><b>Vel:</b> {now_str}</p>
     <p><b>Market:</b> {market} (9:00 AM - 3:30 PM)</p>
     <hr>
+    <p><b>Google Sheet:</b> {creds_status}</p>
     <p><b>Angel KavyaDarsh:</b> Auto 9 to 3:30</p>
     <p><b>Upstox:</b> {token_status} (Auto 9 to 3:30)</p>
     <hr>
