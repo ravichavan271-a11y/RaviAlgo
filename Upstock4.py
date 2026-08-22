@@ -31,10 +31,12 @@ SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
 def get_automatic_token():
+    # 1. ENV
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
-    if tok:
+    if tok and len(tok) > 50:
         print(f"✅ Token from ENV: {tok[:15]}...")
         return tok
+    # 2. FILE
     if os.path.exists("upstox_token.txt"):
         try:
             with open("upstox_token.txt","r") as f:
@@ -45,6 +47,7 @@ def get_automatic_token():
                 return tok
         except Exception as e:
             print(f"File token error: {e}")
+    # 3. SHEET B1 + TOKEN sheet
     try:
         scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
@@ -71,13 +74,14 @@ def get_automatic_token():
         except: pass
     except Exception as e:
         print(f"Sheet token fetch error (ignore): {e}")
-    fallback = "eyJ0eXAiOiJKV1QiLCJraV9pZCI6InNrX3YxLjAiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg5OWYzYzUwY2IxYTU3NGNmZThhNTIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3NDA0MDkyLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODc0MzYwMDB9.NvjzADtl9VPO-vlGFrrz7eY-RXZ6_kOz-4tp9Cjbr3s"
-    print(f"⚠️ Using FALLBACK token: {fallback[:15]}...")
-    return fallback
-
-UPSTOX_ACCESS_TOKEN = get_automatic_token()
+    # NO FALLBACK - return empty, wait for valid token
+    print("⚠️ No token found - will wait for /upstox-login")
+    return ""
 
 def is_token_valid(token):
+    if not token or len(token) < 50:
+        print("❌ Token empty/invalid")
+        return False
     try:
         url = "https://api.upstox.com/v2/user/profile"
         resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
@@ -89,19 +93,24 @@ def is_token_valid(token):
             return False
     except Exception as e:
         print(f"Token valid check error: {e}")
-        return True
+        return False
 
-if not is_token_valid(UPSTOX_ACCESS_TOKEN):
-    msg = f"⚠️ <b>Upstox Token Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now().strftime('%H:%M:%S')}"
-    send_telegram_alert(msg)
-    print("⚠️ TOKEN EXPIRED - Telegram alert sent")
-    for i in range(6):
-        time.sleep(10)
-        new_tok = get_automatic_token()
-        if new_tok != UPSTOX_ACCESS_TOKEN and is_token_valid(new_tok):
-            UPSTOX_ACCESS_TOKEN = new_tok
-            print("✅ New token found and valid!")
-            break
+def wait_for_valid_token():
+    global UPSTOX_ACCESS_TOKEN
+    while True:
+        tok = get_automatic_token()
+        if tok and is_token_valid(tok):
+            UPSTOX_ACCESS_TOKEN = tok
+            print(f"✅ Valid token ready: {tok[:15]}...")
+            return tok
+        print("⏳ No valid token - waiting 60 sec for /upstox-login... (Telegram alert sent)")
+        send_telegram_alert(f"⚠️ <b>Upstox Token Missing/Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now().strftime('%H:%M:%S')}")
+        time.sleep(60)
+
+UPSTOX_ACCESS_TOKEN = get_automatic_token()
+if not UPSTOX_ACCESS_TOKEN or not is_token_valid(UPSTOX_ACCESS_TOKEN):
+    print("⚠️ No valid token at startup - entering wait loop...")
+    UPSTOX_ACCESS_TOKEN = wait_for_valid_token()
 
 alerted_symbols = {}
 
@@ -498,7 +507,7 @@ def start_streamer_with_reconnect():
             streamer.connect()
 
             def sheet_updater():
-                global last_sorted_keys
+                nonlocal last_sorted_keys
                 last_sort=time.time()
                 while True:
                     time.sleep(1)
