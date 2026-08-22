@@ -41,6 +41,48 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except: pass
 
+def get_gspread_client_main():
+    """Get gspread client from FILE, SECRET FILE, or ENV"""
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+    possible_paths = [
+        "service_account.json",
+        "./service_account.json",
+        "/etc/secrets/service_account.json",
+        "/etc/secrets/SERVICE_ACCOUNT_JSON",
+        os.path.join(os.getcwd(), "service_account.json")
+    ]
+    for SERVICE_FILE in possible_paths:
+        if os.path.exists(SERVICE_FILE):
+            try:
+                print(f"✅ Using service_account.json FILE (main) at {SERVICE_FILE}")
+                return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_FILE, scope))
+            except Exception as e:
+                print(f"❌ File auth failed (main) at {SERVICE_FILE}: {e}")
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("GOOGLE_CREDENTIALS", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+    if env_json:
+        try:
+            import json as js
+            creds_dict = js.loads(env_json)
+            print(f"✅ Using service_account from ENV (main) length {len(env_json)}")
+            return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
+        except Exception as e:
+            print(f"❌ ENV auth failed (main): {e}")
+            try:
+                with open("service_account.json", "w") as f:
+                    f.write(env_json)
+                return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope))
+            except Exception as e2:
+                print(f"❌ ENV to file failed (main): {e2}")
+    print(f"❌ NO service_account found in main")
+    try:
+        print(f"📁 Current dir: {os.listdir('.')[:20]}")
+        if os.path.exists("/etc/secrets"):
+            print(f"📁 /etc/secrets: {os.listdir('/etc/secrets')[:20]}")
+    except: pass
+    raise Exception("service_account.json missing")
+
 def get_token_automatic():
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
     if tok and len(tok) > 50:
@@ -54,10 +96,7 @@ def get_token_automatic():
                 return tok
         except: pass
     try:
-        import gspread
-        from oauth2client.service_account import ServiceAccountCredentials
-        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope))
+        gc = get_gspread_client_main()
         sh = gc.open("Dsheet")
         try:
             b1 = sh.sheet1.cell(1,2).value
@@ -65,8 +104,10 @@ def get_token_automatic():
                 with open(TOKEN_FILE,"w") as f: f.write(str(b1).strip())
                 os.environ["UPSTOX_ACCESS_TOKEN"]=str(b1).strip()
                 return str(b1).strip()
-        except: pass
-    except: pass
+        except Exception as e:
+            print(f"B1 fetch error main: {e}")
+    except Exception as e:
+        print(f"get_token_automatic sheet error main: {e}")
     return ""
 
 def is_token_valid(token):
@@ -293,10 +334,7 @@ def upstox_callback():
             with open(TOKEN_FILE,"w") as f: f.write(access_token)
             os.environ["UPSTOX_ACCESS_TOKEN"]=access_token
             try:
-                import gspread
-                from oauth2client.service_account import ServiceAccountCredentials
-                scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-                gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope))
+                gc = get_gspread_client_main()
                 sh = gc.open("Dsheet")
                 sh.sheet1.update_cell(1,2, access_token)
                 print("Token also saved to Sheet B1 for automatic!")
