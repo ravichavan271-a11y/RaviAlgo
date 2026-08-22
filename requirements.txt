@@ -1,9 +1,9 @@
-pandas
+pandas==2.2.2
 pytz
 requests
 gspread
 oauth2client
 upstox-python-sdk
-Flask
-gunicorn
+Flask==3.0.3
+gunicorn==22.0.0
 python-dateutil
