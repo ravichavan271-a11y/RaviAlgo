@@ -7,21 +7,30 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V24 - 24x7 MODE - NO EXIT - AUTO RETRY - VOLUME REALTIME")
+print("FINAL V25 - 24x7 MODE - V22 WORKING + V24 RETRY - NO EXIT")
 
-UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
+# --- TOKEN LOGIC - 3 LEVEL: ENV > FILE > HARDCODED (FALLBACK) ---
+# ENV token sabse pehle (Render var se aayega)
+UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
+
+# File se token (upstox_token.txt)
 if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
     try:
         with open("upstox_token.txt","r") as f:
             UPSTOX_ACCESS_TOKEN = f.read().strip()
-        print(f"Token loaded from file: {UPSTOX_ACCESS_TOKEN[:10]}...")
+        print(f"Token loaded from file: {UPSTOX_ACCESS_TOKEN[:15]}...")
     except Exception as e:
         print(f"Token file read error: {e}")
+
+# Last fallback - Hardcoded (V22 wala - agar ENV/file nahi to ye chalega)
+if not UPSTOX_ACCESS_TOKEN:
+    UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJraV9pZCI6InNrX3YxLjAiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg5OWYzYzUwY2IxYTU3NGNmZThhNTIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3NDA0MDkyLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODc0MzYwMDB9.NvjzADtl9VPO-vlGFrrz7eY-RXZ6_kOz-4tp9Cjbr3s"
+    print(f"Using FALLBACK hardcoded token: {UPSTOX_ACCESS_TOKEN[:15]}...")
 
 SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
-# --- TELEGRAM CONFIG ---
+# --- TELEGRAM CONFIG (V24 se) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -34,11 +43,11 @@ def send_telegram_alert(message):
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"✅ TELEGRAM: {message[:80]}")
+            print(f"TELEGRAM: {message[:80]}")
         else:
-            print(f"❌ Telegram Error: {resp.text}")
+            print(f"Telegram Error: {resp.text}")
     except Exception as e:
-        print(f"❌ Telegram Exception: {e}")
+        print(f"Telegram Exception: {e}")
 
 alerted_symbols = {}
 
@@ -51,7 +60,7 @@ def parse_date(val):
         except: pass
     return s[:10]
 
-# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT ---
+# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT (V24 logic) ---
 gc = None
 sh = None
 sheet = None
@@ -102,6 +111,7 @@ STRUCTURE = {
 }
 
 print("Downloading instrument list...")
+# 5 times retry (V24 logic)
 for attempt in range(5):
     try:
         r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
@@ -113,7 +123,7 @@ for attempt in range(5):
         print(f"Instrument download fail {attempt+1}: {e} - retry 10 sec")
         time.sleep(10)
 else:
-    print("❌ Failed to download instruments after 5 attempts - exiting loop will retry via main.py")
+    print("❌ Failed to download instruments after 5 attempts - will retry via main.py")
     df = pd.DataFrame()
 
 mp={}
@@ -319,52 +329,24 @@ def setup_permanent_colors():
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": breakout_sheet.id, "startRowIndex": 0, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=VALUE(SUBSTITUTE(INDIRECT(\"R\"&ROW()&\"C\"&COLUMN(),FALSE),\"X\",\"\"))>=1"}]}, "format": {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}}}}, "index": 3}},
         ]
         sh.batch_update({"requests": requests_break})
-        print("COLOR RULES DONE")
+        print("COLOR RULES DONE - GREEN ONLY FOR VOL X")
     except Exception as e:
         print(f"Color rule err {e}")
 
-# Safe sheet update with retry
-def safe_sheet_update():
-    for attempt in range(3):
-        try:
-            full = build_sorted()
-            sheet.update(values=full, range_name="A4")
-            breakout_data = build_breakout_sheet()
-            breakout_sheet.clear()
-            breakout_sheet.update(values=breakout_data, range_name="A1")
-            setup_permanent_colors()
-            print(f"DONE {len(row_map)} rows")
-            return True
-        except Exception as e:
-            print(f"Sheet update fail {attempt+1}: {e} - retry 10 sec")
-            time.sleep(10)
-            # Try reconnect sheets
-            try:
-                connect_sheets()
-            except: pass
-    return False
+print("Building sheets...")
+full = build_sorted()
+sheet.update(values=full, range_name="A4")
+breakout_data = build_breakout_sheet()
+breakout_sheet.clear()
+breakout_sheet.update(values=breakout_data, range_name="A1")
+setup_permanent_colors()
+print(f"DONE {len(row_map)} rows - V22 LOGIC SUCCESS")
 
-safe_sheet_update()
-
-# --- STREAMER WITH AUTO RECONNECT - 24x7 ---
+# --- STREAMER WITH 24x7 RECONNECT LOOP (V24 logic + V22 working code) ---
 def start_streamer_with_reconnect():
     while True:
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Upstox Streamer...")
-            # Refresh token each time
-            global UPSTOX_ACCESS_TOKEN
-            UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
-            if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
-                try:
-                    with open("upstox_token.txt","r") as f:
-                        UPSTOX_ACCESS_TOKEN = f.read().strip()
-                except: pass
-            
-            if not UPSTOX_ACCESS_TOKEN:
-                print("❌ No token - waiting 60 sec...")
-                time.sleep(60)
-                continue
-            
+            print("Starting streamer with reconnect loop - V25 FINAL")
             configuration = upstox_client.Configuration()
             configuration.access_token = UPSTOX_ACCESS_TOKEN
             api_client = upstox_client.ApiClient(configuration)
@@ -427,8 +409,8 @@ def start_streamer_with_reconnect():
                     except: pass
 
             def on_open():
-                print("✅ LIVE CONNECTED - V24 24x7 WITH TELEGRAM")
-                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V24 24x7</b>\nMarket screener chalu - Breakout alerts active!")
+                print("✅ LIVE CONNECTED - V25 FINAL - V22 WORKING + V24 24x7")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V25 FINAL</b>\nV22 working logic + V24 24x7 - Market screener chalu!")
 
             streamer.on("open", on_open)
             streamer.on("message", on_message)
