@@ -1,7 +1,26 @@
-import os, json, threading, time, logging
+import os, json, threading, time, logging, sys, subprocess
 from datetime import datetime
 import pytz, requests
 from flask import Flask, jsonify, request, redirect
+
+# --- AUTO-INSTALL MISSING PACKAGES (pyotp fix) ---
+def auto_install(package):
+    try:
+        __import__(package)
+        print(f"✅ {package} already installed")
+    except ImportError:
+        print(f"⚠️ {package} not found - installing...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            print(f"✅ {package} installed successfully!")
+        except Exception as e:
+            print(f"❌ Failed to install {package}: {e}")
+
+# Try to auto-install critical packages
+for pkg in ["pyotp", "pandas", "gspread", "upstox_client"]:
+    try:
+        auto_install(pkg)
+    except: pass
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 import warnings
@@ -75,16 +94,21 @@ def run_kavyadarsh():
     while True:
         try:
             print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - 24x7 MODE (Angel One - Auto TOTP)")
+            # Auto-install pyotp before import
+            try:
+                import pyotp
+            except ImportError:
+                print("pyotp missing in KavyaDarsh - installing...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "pyotp"])
+                import pyotp
             file_status["kavyadarsh"]["running"] = True
             file_status["kavyadarsh"]["last_start"] = datetime.now(IST).isoformat()
             file_status["kavyadarsh"]["count"] += 1
             file_status["kavyadarsh"]["error"] = ""
             if os.path.exists("KavyaDarsh.py"):
-                import sys
                 if 'KavyaDarsh' in sys.modules: del sys.modules['KavyaDarsh']
                 import KavyaDarsh
             elif os.path.exists("kavyadarsh.py"):
-                import sys
                 if 'kavyadarsh' in sys.modules: del sys.modules['kavyadarsh']
                 import kavyadarsh
             else:
@@ -95,7 +119,8 @@ def run_kavyadarsh():
         except Exception as e:
             import traceback
             err = str(e)[:500]
-            print(f"KavyaDarsh CRASHED: {err}")
+            tb = traceback.format_exc()[:1000]
+            print(f"KavyaDarsh CRASHED: {err}\n{tb}")
             file_status["kavyadarsh"]["error"] = err
             file_status["kavyadarsh"]["running"] = False
             time.sleep(5)
