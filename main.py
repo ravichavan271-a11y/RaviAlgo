@@ -10,8 +10,8 @@ import pytz
 from flask import Flask, redirect, request
 
 app = Flask(__name__)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8255515384:AAEREJpnfiMkr3vOjBhgRBgCTZNUbPcpyHI")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7602442830")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TOKEN_FILE = "upstox_token.txt"
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -50,7 +50,7 @@ def home():
     <h3>System Check:</h3>
     <p>📄 Google Sheet: {ce}</p>
     <p>📈 Upstox Token: {te}</p>
-    <p>📱 Telegram: {tg} -> Chat 7602442830</p>
+    <p>📱 Telegram: {tg} -> Chat TELEGRAM_CHAT_ID or "Not Set"</p>
     <p>🧵 Threads: {len(threads)} active ({thread_list})</p>
     <p>🔄 Keep Alive: Active (10 min self ping)</p>
     <p>🌐 UptimeRobot: Active (5 min ping to /ping)</p>
@@ -90,7 +90,7 @@ def status():
     <p><b>Market Hours:</b> {market} (9:00-15:30 Mon-Fri)</p>
     <p><b>Upstox Token Exists:</b> {te}</p>
     <p><b>Google Creds Exists:</b> {ce}</p>
-    <p><b>Telegram Config:</b> Token={TELEGRAM_BOT_TOKEN[:10]}... Chat={TELEGRAM_CHAT_ID}</p>
+    <p><b>Telegram Config:</b> Token={ "Set" if TELEGRAM_BOT_TOKEN else "Not Set"}... Chat={ TELEGRAM_CHAT_ID if TELEGRAM_CHAT_ID else "Not Set"}</p>
     <p><b>Active Threads:</b><br>{thread_info}</p>
     <p><b>Sheet Status:</b> {sheet_status}</p>
     <hr>
