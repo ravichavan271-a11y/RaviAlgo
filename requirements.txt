@@ -1,10 +1,6 @@
-# Fixed requirements - based on last successful build
-pyotp
 pandas
 pytz
 requests
-smartapi-python
-logzero
 gspread
 oauth2client
 upstox-python-sdk
