@@ -1,33 +1,23 @@
-
-import os, json, threading, time, gzip, io, re, logging
+import os, json, threading, time, logging
 from datetime import datetime
-from collections import deque
-import pytz, requests, pandas as pd
-from flask import Flask, jsonify, request, render_template_string, redirect
-import upstox_client
+import pytz, requests
+from flask import Flask, jsonify, request, redirect
 
-# --- FAST CONFIG - NO LOGGING ---
+# --- CONFIG ---
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
-logging.getLogger('upstox_client').setLevel(logging.ERROR)
 import warnings
 warnings.filterwarnings("ignore")
 
 IST = pytz.timezone('Asia/Kolkata')
 TOKEN_FILE = "upstox_token.txt"
-PAPER_FILE = "flattrade_paper.json"
-KEY_MAP_FILE = "symbol_keys.json"
-
-app = Flask(__name__)
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
 
-# --- IN-MEMORY CACHE - NO DISK IO ON EVERY TICK ---
-paper_cache = None
-paper_cache_lock = threading.Lock()
-last_save_time = 0
-SAVE_DEBOUNCE = 2.0  # 2 sec debounce - fast movement madhe file write nahi
+app = Flask(__name__)
+
+# --- 24x7 MODE - ALWAYS RUN ---
+RUN_24_7 = True  # Sarv time chalnari file
 
 def get_token():
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
@@ -37,525 +27,200 @@ def get_token():
         except: pass
     return tok
 
-instrument_cache = {}
-instrument_list = []
-instrument_list_lock = threading.Lock()
+# Track status
+file_status = {
+    "kavyadarsh": {"running": False, "last_start": "", "error": "", "count": 0, "file_exists": False},
+    "upstock4": {"running": False, "last_start": "", "error": "", "count": 0, "file_exists": False}
+}
 
-def load_instruments():
-    global instrument_cache, instrument_list
-    if instrument_cache: return instrument_cache
-    try:
-        r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
-        with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
-            df = pd.read_csv(gz)
-        mp={}
-        lst=[]
-        # Counters
-        eq_count=0; fo_count=0; idx_count=0
-        for _, row in df.iterrows():
-            sym=str(row.get("tradingsymbol","")).strip()
-            key=str(row.get("instrument_key","")).strip()
-            name=str(row.get("short_name","") or row.get("name","") or row.get("tradingsymbol","") or "")
-            exch=str(row.get("exchange",""))
-            if not sym or not key: continue
-            # Include NSE_EQ, NSE_FO, NSE_INDEX, BSE, etc
-            if "NSE" not in key and "BSE" not in key:
-                continue
-            lst.append({"symbol":sym,"key":key,"name":name,"exchange":exch})
-            if "NSE_EQ" in key:
-                mp[sym]=key
-                eq_count+=1
-                if sym.endswith("-EQ"):
-                    clean=sym.replace("-EQ","")
-                    mp[clean]=key
-                    lst.append({"symbol":clean,"key":key,"name":name,"exchange":exch})
-            elif "NSE_INDEX" in key:
-                mp[sym]=key
-                idx_count+=1
-                if "Nifty 50" in key or "NIFTY 50" in sym.upper(): mp["NIFTY 50"]=key; mp["NIFTY"]=key
-                if "Nifty Bank" in key or "BANKNIFTY" in sym.upper(): mp["NIFTY BANK"]=key; mp["BANKNIFTY"]=key
-                if "Fin" in key: mp["FINNIFTY"]=key
-            elif "NSE_FO" in key:
-                mp[sym]=key
-                fo_count+=1
-                # Also add without date for easier search? e.g. NIFTY24200CE
-                # Keep original
-            else:
-                if sym not in mp:
-                    mp[sym]=key
-        mp["M&M"]="NSE_EQ|INE101A01026"
-        mp["NIFTY 50"]="NSE_INDEX|Nifty 50"; mp["NIFTY"]="NSE_INDEX|Nifty 50"
-        mp["NIFTY BANK"]="NSE_INDEX|Nifty Bank"; mp["BANKNIFTY"]="NSE_INDEX|Nifty Bank"
-        mp["FINNIFTY"]="NSE_INDEX|Nifty Fin Service"
-        mp["SENSEX"]="BSE_INDEX|SENSEX"
-        with instrument_list_lock:
-            instrument_cache=mp
-            instrument_list=lst
-        print(f"INSTRUMENTS LOADED: EQ={eq_count} FO={fo_count} IDX={idx_count} TOTAL={len(lst)}")
-        return mp
-    except Exception as e:
-        print(f"load_instruments error: {e}")
-        return {}
+def check_files():
+    file_status["kavyadarsh"]["file_exists"] = os.path.exists("KavyaDarsh.py") or os.path.exists("kavyadarsh.py")
+    file_status["upstock4"]["file_exists"] = os.path.exists("Upstock4.py") or os.path.exists("upstock4.py")
 
-def load_paper_from_disk():
-    if os.path.exists(PAPER_FILE):
-        try:
-            with open(PAPER_FILE,"r") as f: return json.load(f)
-        except: pass
-    return {"balance":100000.0, "positions":[], "orders":[], "watchlist":["RELIANCE","INFY","TCS","NIFTY 50","NIFTY BANK","NIFTY 26000 CE","BANKNIFTY 58000 CE"]}
-
-def get_paper():
-    global paper_cache
-    with paper_cache_lock:
-        if paper_cache is None:
-            paper_cache = load_paper_from_disk()
-        return paper_cache
-
-def save_paper_fast(paper_data=None, force=False):
-    global paper_cache, last_save_time
-    now = time.time()
-    with paper_cache_lock:
-        if paper_data is not None:
-            paper_cache = paper_data
-        # Debounce - fast market madhe har tick la save nako
-        if not force and (now - last_save_time) < SAVE_DEBOUNCE:
-            return
-        last_save_time = now
-        data_to_save = paper_cache
-    # Async file write - background la
-    def _write():
-        try:
-            with open(PAPER_FILE,"w") as f: json.dump(data_to_save,f)
-        except: pass
-    threading.Thread(target=_write, daemon=True).start()
-
-# Initial load
-load_instruments()
-get_paper()
-
-# --- ULTRA FAST LTP - NO LOCK ON READ ---
-live_ltp = {}
-live_ltp_lock = threading.Lock()
-ltp_update_count = 0
-
-def start_streamer():
-    token = get_token()
-    if not token: return
-    mp = load_instruments()
-    def get_keys():
-        paper = get_paper()
-        syms = list(set(paper.get("watchlist",[]) + [p["symbol"] for p in paper.get("positions",[])]))
-        keys=[]
-        for s in syms:
-            k=mp.get(s) or mp.get(s+"-EQ")
-            if not k:
-                for p in paper.get("positions",[]):
-                    if p["symbol"]==s: k=p.get("instrument_key")
-            if k: keys.append(k)
-        for p in paper.get("positions",[]):
-            if p.get("instrument_key") and p.get("instrument_key") not in keys:
-                keys.append(p.get("instrument_key"))
-        return list(set(keys))[:200]  # 200 keys support - options sathi jast
-    
-    try:
-        cfg = upstox_client.Configuration()
-        cfg.access_token = token
-        api_client = upstox_client.ApiClient(cfg)
-        keys = get_keys()
-        if not keys: keys=["NSE_INDEX|Nifty 50","NSE_INDEX|Nifty Bank"]
-        # FAST MODE: ltpc mode - only LTP + LTT + CP - sabse fast
-        streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=keys, mode="ltpc")
-        def on_message(msg):
-            global ltp_update_count
-            feeds=msg.get("feeds",{})
-            # Batch update - no print, no logging
-            with live_ltp_lock:
-                for ikey, feed in feeds.items():
-                    try:
-                        ltp=None
-                        if "ltpc" in feed: 
-                            ltp=feed["ltpc"].get("ltp")
-                        elif "fullFeed" in feed:
-                            ff=feed["fullFeed"]
-                            if "marketFF" in ff: ltp=ff["marketFF"].get("ltpc",{}).get("ltp")
-                            elif "indexFF" in ff: ltp=ff["indexFF"].get("ltpc",{}).get("ltp")
-                        if ltp: 
-                            live_ltp[ikey]=float(ltp)
-                            ltp_update_count+=1
-                    except: pass
-        def on_open(): pass  # No print - fast
-        streamer.on("open", on_open)
-        streamer.on("message", on_message)
-        streamer.connect()
-    except: pass
-
-threading.Thread(target=start_streamer, daemon=True).start()
-
-# --- ULTRA FAST AUTO MONITOR - 200ms Check ---
-def auto_monitor():
+def run_kavyadarsh():
+    global file_status
+    check_files()
     while True:
         try:
-            time.sleep(0.2)  # 200ms - fast movement sathi
-            paper = get_paper()
-            if not paper["positions"]: continue
-            with live_ltp_lock: ltp_copy=dict(live_ltp)
-            mp = load_instruments()
-            to_close=[]
-            changed=False
-            for idx, pos in enumerate(paper["positions"]):
-                key=pos.get("instrument_key") or mp.get(pos["symbol"]) or mp.get(pos["symbol"]+"-EQ")
-                ltp=ltp_copy.get(key)
-                if not ltp: ltp=pos.get("ltp", pos["entry_price"])
-                if not ltp: continue
-                # Update LTP in memory only - no disk
-                pos["ltp"]=ltp
-                pos["pnl"]=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-                pos["pnl_pct"]=(pos["pnl"]/(pos["entry_price"]*pos["qty"])*100 if pos["entry_price"]>0 else 0)
-                # Trail SL
-                if pos.get("trail") and pos["side"]=="BUY" and ltp>pos["entry_price"]:
-                    new_sl = ltp * 0.995
-                    if new_sl > pos.get("sl",0):
-                        pos["sl"]=new_sl
-                        changed=True
-                elif pos.get("trail") and pos["side"]=="SELL" and ltp<pos["entry_price"]:
-                    new_sl = ltp * 1.005
-                    if pos.get("sl",0)==0 or new_sl < pos["sl"]:
-                        pos["sl"]=new_sl
-                        changed=True
-                # SL/TGT check
-                if pos.get("sl",0)>0:
-                    if (pos["side"]=="BUY" and ltp <= pos["sl"]) or (pos["side"]=="SELL" and ltp >= pos["sl"]):
-                        to_close.append((idx, "SL HIT", ltp))
-                if pos.get("target",0)>0:
-                    if (pos["side"]=="BUY" and ltp >= pos["target"]) or (pos["side"]=="SELL" and ltp <= pos["target"]):
-                        to_close.append((idx, "TARGET HIT", ltp))
-            for idx, reason, ltp in sorted(to_close, key=lambda x: x[0], reverse=True):
-                if idx < len(paper["positions"]):
-                    pos=paper["positions"].pop(idx)
-                    pnl=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-                    paper["balance"]+=pnl
-                    paper["orders"].append({"symbol":pos["symbol"],"qty":pos["qty"],"side":"SELL" if pos["side"]=="BUY" else "BUY","price":float(ltp),"sl":pos.get("sl",0),"target":pos.get("target",0),"status":f"{reason} ₹{pnl:.2f}","time":datetime.now(IST).isoformat()})
-                    changed=True
-            if changed:
-                save_paper_fast(paper, force=False)
-        except: 
-            time.sleep(0.5)
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - 24x7 MODE - No time check")
+            file_status["kavyadarsh"]["running"] = True
+            file_status["kavyadarsh"]["last_start"] = datetime.now(IST).isoformat()
+            file_status["kavyadarsh"]["count"] += 1
+            file_status["kavyadarsh"]["error"] = ""
+            
+            if os.path.exists("KavyaDarsh.py"):
+                # Remove cached module if exists to allow restart
+                if 'KavyaDarsh' in globals() or 'KavyaDarsh' in dir():
+                    try:
+                        import sys
+                        if 'KavyaDarsh' in sys.modules:
+                            del sys.modules['KavyaDarsh']
+                    except: pass
+                import KavyaDarsh
+            elif os.path.exists("kavyadarsh.py"):
+                import sys
+                if 'kavyadarsh' in sys.modules:
+                    del sys.modules['kavyadarsh']
+                import kavyadarsh
+            else:
+                print("KavyaDarsh.py NOT FOUND in current directory")
+                print(f"Files in dir: {os.listdir('.')}")
+                file_status["kavyadarsh"]["error"] = "File not found - Upload KavyaDarsh.py to GitHub"
+                file_status["kavyadarsh"]["running"] = False
+                time.sleep(30)
+                continue
+                
+        except Exception as e:
+            import traceback
+            err = str(e)[:500]
+            tb = traceback.format_exc()[:1000]
+            print(f"KavyaDarsh CRASHED: {err}\n{tb}")
+            file_status["kavyadarsh"]["error"] = err
+            file_status["kavyadarsh"]["running"] = False
+            time.sleep(5)
 
-threading.Thread(target=auto_monitor, daemon=True).start()
+def run_upstox():
+    global file_status
+    check_files()
+    while True:
+        try:
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - 24x7 MODE - No time check")
+            file_status["upstock4"]["running"] = True
+            file_status["upstock4"]["last_start"] = datetime.now(IST).isoformat()
+            file_status["upstock4"]["count"] += 1
+            file_status["upstock4"]["error"] = ""
+            
+            # Token check - log but don't stop, ENV token may exist
+            tok = get_token()
+            if not tok:
+                print("WARNING: Upstox token not found in file or ENV, but still trying to run Upstock4.py")
+            else:
+                print(f"Token found: {tok[:10]}...{tok[-5:]}")
+            
+            if os.path.exists("Upstock4.py"):
+                import sys
+                if 'Upstock4' in sys.modules:
+                    del sys.modules['Upstock4']
+                import Upstock4
+            elif os.path.exists("upstock4.py"):
+                import sys
+                if 'upstock4' in sys.modules:
+                    del sys.modules['upstock4']
+                import upstock4
+            else:
+                print("Upstock4.py NOT FOUND")
+                print(f"Files in dir: {os.listdir('.')}")
+                file_status["upstock4"]["error"] = "File not found - Upload Upstock4.py to GitHub"
+                file_status["upstock4"]["running"] = False
+                time.sleep(30)
+                continue
+                
+        except Exception as e:
+            import traceback
+            err = str(e)[:500]
+            tb = traceback.format_exc()[:1000]
+            print(f"Upstock4 CRASHED: {err}\n{tb}")
+            file_status["upstock4"]["error"] = err
+            file_status["upstock4"]["running"] = False
+            time.sleep(5)
 
-# --- FLASK ROUTES - NO LOGGING ---
-@app.route('/manifest.json')
-def manifest():
-    return jsonify({"name":"Ravi Flattrade FAST","short_name":"Flattrade","start_url":"/flattrade","display":"standalone","background_color":"#0a0a0a","theme_color":"#ff5722"})
+def send_telegram():
+    try:
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print("Telegram not configured")
+            return
+        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload={
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "text": f"✅ 24x7 MODE ACTIVE\n\nUpstock4.py + KavyaDarsh.py donhi chalu aahet!\nPaper trading kadhla aahe\nMobile app kadhla aahe\nTime check OFF - Testing mode\n\nTime: {datetime.now(IST).strftime('%H:%M:%S')}", 
+            "parse_mode": "HTML"
+        }
+        requests.post(url, json=payload, timeout=10)
+        print("Telegram 24x7 alert sent")
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
+def keep_alive():
+    while True:
+        try:
+            # Self ping to keep Render awake
+            try: 
+                requests.get('https://ravialgo.onrender.com/ping',timeout=5)
+                print(f"Keep alive ping {datetime.now(IST).strftime('%H:%M:%S')}")
+            except: pass
+            time.sleep(300)  # 5 min
+        except: time.sleep(60)
+
+# --- ROUTES - NO PAPER TRADING, NO MOBILE APP ---
 
 @app.route('/')
-@app.route('/flattrade')
-@app.route('/mobile')
-@app.route('/paper-trading')
 def home():
-    # Ultra robust - try all possible paths on Render
-    possible_paths = [
-        'mobile_app.html',
-        'mobile-app.html',
-        'Mobile-App.html',
-        './mobile_app.html',
-        './mobile-app.html',
-        os.path.join(os.getcwd(), 'mobile_app.html'),
-        os.path.join(os.getcwd(), 'mobile-app.html'),
-        os.path.join(os.path.dirname(__file__), 'mobile_app.html'),
-        os.path.join(os.path.dirname(__file__), 'mobile-app.html'),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobile_app.html'),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobile-app.html'),
-        '/opt/render/project/src/mobile_app.html',
-        '/opt/render/project/src/mobile-app.html',
-        '/mnt/data/mobile_app.html',
-        '/mnt/data/mobile-app.html'
-    ]
-    html_path = None
-    checked = []
-    for p in possible_paths:
-        checked.append(p)
-        if os.path.exists(p):
-            html_path = p
-            break
-    if not html_path:
-        # Debug - show what files exist in current dir
-        try:
-            files = os.listdir('.')
-            files2 = os.listdir(os.path.dirname(__file__)) if os.path.exists(os.path.dirname(__file__)) else []
-            return f"<h2>mobile_app.html not found</h2><p>Checked: {checked}</p><p>Current dir files: {files}</p><p>Script dir files: {files2}</p><p>cwd: {os.getcwd()}</p><p>__file__: {__file__}</p>", 404
-        except Exception as e:
-            return f"<h2>mobile_app.html not found: {e}</h2><p>Checked: {checked}</p>", 404
-    try:
-        html = open(html_path, encoding='utf-8').read()
-        return render_template_string(html)
-    except Exception as e:
-        return f"<h2>Error reading {html_path}: {e}</h2>", 500
-
-
-@app.route('/api/search')
-def api_search():
-    q = request.args.get('q','').strip().upper()
-    if not q: return jsonify({"results":[]})
-    # Tokenize query: split by space, remove empty
-    tokens = [t for t in q.replace('  ',' ').split(' ') if t]
-    mp = load_instruments()
-    with instrument_list_lock:
-        ilist = list(instrument_list)
-    results=[]
-    for item in ilist:
-        sym=item["symbol"].upper()
-        # Check if ALL tokens are present in symbol (space independent)
-        match = all(tok in sym for tok in tokens)
-        # Also try without spaces: join tokens
-        if not match:
-            # e.g. NIFTY 24200 CE -> check NIFTY24200CE in sym
-            joined = ''.join(tokens)
-            match = joined in sym.replace(' ','')
-        if match:
-            if "NSE_FO" in item["key"]:
-                opt_type="CE" if sym.endswith("CE") else "PE" if sym.endswith("PE") else "FUT"
-                results.append({"symbol":item["symbol"],"key":item["key"],"type":"OPT" if opt_type in ["CE","PE"] else "FUT","opt_type":opt_type,"name":item["name"]})
-            elif "NSE_INDEX" in item["key"]:
-                results.append({"symbol":item["symbol"],"key":item["key"],"type":"INDEX","name":item["name"]})
-            elif "NSE_EQ" in item["key"]:
-                results.append({"symbol":item["symbol"].replace("-EQ",""),"key":item["key"],"type":"EQ","name":item["name"]})
-            if len(results)>=40: break
-    if len(results)<5:
-        for k,v in mp.items():
-            ku=k.upper()
-            if all(tok in ku for tok in tokens) and k not in [r["symbol"] for r in results]:
-                results.append({"symbol":k,"key":v,"type":"OPT" if "FO" in v else "INDEX" if "INDEX" in v else "EQ","opt_type":"CE" if "CE" in ku else "PE","name":""})
-            if len(results)>=40: break
-    with live_ltp_lock: ltp_copy=dict(live_ltp)
-    for r in results:
-        r["ltp"]=ltp_copy.get(r["key"],0)
-    return jsonify({"results":results[:25]})
-
-@app.route('/api/ltp')
-def api_ltp():
-    key=request.args.get('key','')
-    with live_ltp_lock: ltp=live_ltp.get(key,0)
-    if ltp==0:
-        token=get_token()
-        if token and key:
-            try:
-                url=f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={key}"
-                headers={"Authorization":f"Bearer {token}"}
-                rr=requests.get(url,headers=headers,timeout=3)
-                if rr.status_code==200:
-                    j=rr.json()
-                    ltp=j.get("data",{}).get(key,{}).get("last_price",0)
-                    if ltp:
-                        with live_ltp_lock: live_ltp[key]=float(ltp)
-            except: pass
-    return jsonify({"ltp":ltp,"key":key})
-
-@app.route('/api/optionchain')
-def api_optionchain():
-    underlying = request.args.get('underlying','NIFTY').upper()
-    mp = load_instruments()
-    with instrument_list_lock: ilist = list(instrument_list)
-    fo_list = [x for x in ilist if "NSE_FO" in x["key"] and x["symbol"].startswith(underlying)]
-    strikes={}
-    underlying_key = mp.get(underlying) or (mp.get("NIFTY 50") if underlying=="NIFTY" else mp.get("NIFTY BANK") if underlying=="BANKNIFTY" else None)
-    with live_ltp_lock: ltp_copy=dict(live_ltp)
-    underlying_ltp=ltp_copy.get(underlying_key,0) if underlying_key else 0
-    pattern = re.compile(r'(\d+)(CE|PE)$')
-    for item in fo_list:
-        m=pattern.search(item["symbol"])
-        if not m: continue
-        try: strike=int(m.group(1))
-        except: continue
-        opt_type=m.group(2)
-        if strike not in strikes:
-            strikes[strike]={"strike":strike,"ce_symbol":None,"pe_symbol":None,"ce_key":None,"pe_key":None,"ce_ltp":0,"pe_ltp":0}
-        if opt_type=="CE":
-            strikes[strike]["ce_symbol"]=item["symbol"]
-            strikes[strike]["ce_key"]=item["key"]
-            strikes[strike]["ce_ltp"]=ltp_copy.get(item["key"],0)
-        else:
-            strikes[strike]["pe_symbol"]=item["symbol"]
-            strikes[strike]["pe_key"]=item["key"]
-            strikes[strike]["pe_ltp"]=ltp_copy.get(item["key"],0)
-    sorted_strikes=sorted(strikes.values(), key=lambda x: x["strike"])
-    if underlying_ltp>0 and sorted_strikes:
-        atm_idx=min(range(len(sorted_strikes)), key=lambda i: abs(sorted_strikes[i]["strike"]-underlying_ltp))
-        start=max(0, atm_idx-12)
-        end=min(len(sorted_strikes), atm_idx+13)
-        sorted_strikes=sorted_strikes[start:end]
-    else:
-        sorted_strikes=sorted_strikes[:25]
-    return jsonify({"underlying":underlying,"underlying_ltp":underlying_ltp,"strikes":sorted_strikes})
-
-@app.route('/api/flattrade/data')
-def api_data():
-    paper = get_paper()
-    mp = load_instruments()
-    with live_ltp_lock: ltp_copy=dict(live_ltp)
-    symbol_ltp={}
-    keys_map={}
-    for sym in set(paper.get("watchlist",[]) + [p["symbol"] for p in paper.get("positions",[])]):
-        key=None
-        for p in paper.get("positions",[]):
-            if p["symbol"]==sym and p.get("instrument_key"): key=p.get("instrument_key")
-        if not key: 
-            key=mp.get(sym) or mp.get(sym+"-EQ")
-            # check key file
-            if not key and os.path.exists(KEY_MAP_FILE):
-                try:
-                    with open(KEY_MAP_FILE,"r") as f: km=json.load(f)
-                    key=km.get(sym)
-                except: pass
-        if key:
-            keys_map[sym]=key
-            if key in ltp_copy: symbol_ltp[sym]=ltp_copy[key]
-    # Update pnl in memory - no disk
-    for pos in paper["positions"]:
-        key=pos.get("instrument_key") or mp.get(pos["symbol"])
-        ltp=ltp_copy.get(key, pos.get("ltp", pos["entry_price"]))
-        if ltp:
-            pos["ltp"]=ltp
-            pos["pnl"]=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-            pos["pnl_pct"]=(pos["pnl"]/(pos["entry_price"]*pos["qty"])*100 if pos["entry_price"]>0 else 0)
-    return jsonify({"balance":paper["balance"],"watchlist":paper["watchlist"],"positions":paper["positions"],"orders":paper["orders"][-80:],"symbolLTP":symbol_ltp,"keys":keys_map,"ltp_count":len(ltp_copy)})
-
-@app.route('/api/flattrade/order', methods=['POST'])
-def api_order():
-    data=request.json
-    sym=data.get("symbol","").strip().upper()
-    key=data.get("key","").strip()
-    qty=int(data.get("qty",1))
-    side=data.get("side","BUY")
-    sl=float(data.get("sl",0) or 0)
-    target=float(data.get("target",0) or 0)
-    trail=bool(data.get("trail",False))
-    mp=load_instruments()
-    if not key: key=mp.get(sym) or mp.get(sym+"-EQ") or ""
-    if not key:
-        with instrument_list_lock:
-            for item in instrument_list:
-                if item["symbol"]==sym: key=item["key"]; break
-    if not key: return jsonify({"ok":False,"error":"Symbol not found - Search kara"})
-    with live_ltp_lock: ltp=live_ltp.get(key,0)
-    if ltp==0:
-        token=get_token()
-        if token:
-            try:
-                url=f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={key}"
-                headers={"Authorization":f"Bearer {token}"}
-                r=requests.get(url,headers=headers,timeout=3)
-                if r.status_code==200:
-                    j=r.json()
-                    ltp=j.get("data",{}).get(key,{}).get("last_price",0)
-                    if ltp:
-                        with live_ltp_lock: live_ltp[key]=float(ltp)
-            except: pass
-    if ltp==0: return jsonify({"ok":False,"error":"LTP 0 - Market band, 9:15 la try"})
-    paper = get_paper()
-    paper["positions"].append({"symbol":sym,"instrument_key":key,"qty":qty,"side":side,"entry_price":float(ltp),"ltp":float(ltp),"sl":sl,"target":target,"trail":trail,"pnl":0.0,"pnl_pct":0.0,"time":datetime.now(IST).isoformat()})
-    paper["orders"].append({"symbol":sym,"qty":qty,"side":side,"price":float(ltp),"sl":sl,"target":target,"status":"OPEN","time":datetime.now(IST).isoformat()})
-    save_paper_fast(paper, force=True)  # force save on order
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/close', methods=['POST'])
-def api_close():
-    idx=request.json.get("idx")
-    paper = get_paper()
-    if 0 <= idx < len(paper["positions"]):
-        with live_ltp_lock: ltp_copy=dict(live_ltp)
-        pos=paper["positions"].pop(idx)
-        ltp=ltp_copy.get(pos["instrument_key"], pos["ltp"])
-        pnl=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-        paper["balance"]+=pnl
-        paper["orders"].append({"symbol":pos["symbol"],"qty":pos["qty"],"side":"SELL" if pos["side"]=="BUY" else "BUY","price":float(ltp),"sl":pos.get("sl",0),"target":pos.get("target",0),"status":f"CLOSE ₹{pnl:.2f}","time":datetime.now(IST).isoformat()})
-        save_paper_fast(paper, force=True)
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/swap', methods=['POST'])
-def api_swap():
-    idx=request.json.get("idx")
-    paper = get_paper()
-    if 0 <= idx < len(paper["positions"]):
-        with live_ltp_lock: ltp_copy=dict(live_ltp)
-        pos=paper["positions"].pop(idx)
-        ltp=ltp_copy.get(pos["instrument_key"], pos["ltp"])
-        pnl=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-        paper["balance"]+=pnl
-        paper["orders"].append({"symbol":pos["symbol"],"qty":pos["qty"],"side":"SELL" if pos["side"]=="BUY" else "BUY","price":float(ltp),"status":f"SWAP CLOSE ₹{pnl:.2f}","time":datetime.now(IST).isoformat()})
-        new_side="SELL" if pos["side"]=="BUY" else "BUY"
-        paper["positions"].append({"symbol":pos["symbol"],"instrument_key":pos["instrument_key"],"qty":pos["qty"],"side":new_side,"entry_price":float(ltp),"ltp":float(ltp),"sl":0,"target":0,"trail":False,"pnl":0.0,"pnl_pct":0.0,"time":datetime.now(IST).isoformat()})
-        paper["orders"].append({"symbol":pos["symbol"],"qty":pos["qty"],"side":new_side,"price":float(ltp),"status":"SWAP OPEN","time":datetime.now(IST).isoformat()})
-        save_paper_fast(paper, force=True)
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/modify', methods=['POST'])
-def api_modify():
-    data=request.json
-    idx=data.get("idx")
-    sl=float(data.get("sl",0) or 0)
-    target=float(data.get("target",0) or 0)
-    paper = get_paper()
-    if 0 <= idx < len(paper["positions"]):
-        paper["positions"][idx]["sl"]=sl
-        paper["positions"][idx]["target"]=target
-        save_paper_fast(paper, force=True)
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/watchlist', methods=['POST'])
-def api_watch():
-    sym=request.json.get("symbol","").strip().upper()
-    key=request.json.get("key","").strip()
-    paper = get_paper()
-    if sym and sym not in paper["watchlist"]:
-        paper["watchlist"].insert(0,sym)
-        paper["watchlist"]=paper["watchlist"][:100]
-        try:
-            km={}
-            if os.path.exists(KEY_MAP_FILE):
-                with open(KEY_MAP_FILE,"r") as f: km=json.load(f)
-            if key: km[sym]=key
-            with open(KEY_MAP_FILE,"w") as f: json.dump(km,f)
-        except: pass
-        save_paper_fast(paper, force=True)
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/reset', methods=['POST'])
-def api_reset():
-    global paper_cache
-    with paper_cache_lock:
-        paper_cache=None
-    if os.path.exists(PAPER_FILE): 
-        try: os.remove(PAPER_FILE)
-        except: pass
-    if os.path.exists(KEY_MAP_FILE):
-        try: os.remove(KEY_MAP_FILE)
-        except: pass
-    return jsonify({"ok":True})
-
-@app.route('/api/flattrade/squareoff', methods=['POST'])
-def api_squareoff():
-    paper = get_paper()
-    total=0
-    with live_ltp_lock: ltp_copy=dict(live_ltp)
-    for pos in paper["positions"]:
-        ltp=ltp_copy.get(pos["instrument_key"], pos["ltp"])
-        pnl=(ltp - pos["entry_price"])*pos["qty"] if pos["side"]=="BUY" else (pos["entry_price"]-ltp)*pos["qty"]
-        total+=pnl
-    paper["balance"]+=total
-    paper["positions"]=[]
-    paper["orders"].append({"symbol":"ALL","qty":0,"side":"SQUAREOFF","price":0,"status":f"SQUAREOFF ALL ₹{total:.2f}","time":datetime.now(IST).isoformat()})
-    save_paper_fast(paper, force=True)
-    return jsonify({"ok":True})
+    return f'''
+    <h1>✅ 24x7 Mode - Upstock4 + KavyaDarsh</h1>
+    <p>Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}</p>
+    <p>RUN_24_7: {RUN_24_7} - Sarv time chalnari</p>
+    <p><b>Paper trading:</b> Kadhlay ✅</p>
+    <p><b>Mobile app:</b> Kadhlay ✅</p>
+    <hr>
+    <p><a href="/status">/status - JSON Status</a></p>
+    <p><a href="/logs">/logs - Logs</a></p>
+    <p><a href="/ping">/ping</a></p>
+    <p><a href="/upstox-login">/upstox-login - Upstox Login</a></p>
+    <hr>
+    <p>Files: {os.listdir('.')[:15]}</p>
+    '''
 
 @app.route('/ping')
 def ping():
-    with live_ltp_lock: cnt=len(live_ltp)
-    return f"PONG {datetime.now(IST).strftime('%H:%M:%S')} LTP:{cnt}",200
+    return f"PONG {datetime.now(IST).strftime('%H:%M:%S')} RUN_24_7={RUN_24_7} Upstock4={file_status['upstock4']['running']} KavyaDarsh={file_status['kavyadarsh']['running']}",200
+
+@app.route('/status')
+def status():
+    check_files()
+    token_exists = os.path.exists(TOKEN_FILE)
+    env_token = bool(os.environ.get("UPSTOX_ACCESS_TOKEN") or os.environ.get("UPSTOX_TOKEN"))
+    return jsonify({
+        "time": datetime.now(IST).isoformat(),
+        "run_24_7": RUN_24_7,
+        "mode": "NO PAPER TRADING, NO MOBILE APP - ONLY Upstock4 + KavyaDarsh",
+        "files": file_status,
+        "token_file_exists": token_exists,
+        "env_token_exists": env_token,
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "dir_files": [f for f in os.listdir('.') if f.endswith('.py')][:20]
+    })
+
+@app.route('/logs')
+def logs():
+    check_files()
+    html = f'''
+    <html><head><meta http-equiv="refresh" content="10"></head><body>
+    <h2>🔥 24x7 Status - {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} (Auto refresh 10s)</h2>
+    <p><b>RUN_24_7:</b> {RUN_24_7} - Sarv time chalnar, time check OFF</p>
+    <p><b>Paper trading:</b> ❌ Kadhlay | <b>Mobile app:</b> ❌ Kadhlay</p>
+    <hr>
+    <h3>Upstock4.py</h3>
+    <p>File exists: {file_status["upstock4"]["file_exists"]} | Running: {file_status["upstock4"]["running"]} | Count: {file_status["upstock4"]["count"]}<br>
+    Last start: {file_status["upstock4"]["last_start"]}<br>
+    Error: {file_status["upstock4"]["error"]}</p>
+    <hr>
+    <h3>KavyaDarsh.py</h3>
+    <p>File exists: {file_status["kavyadarsh"]["file_exists"]} | Running: {file_status["kavyadarsh"]["running"]} | Count: {file_status["kavyadarsh"]["count"]}<br>
+    Last start: {file_status["kavyadarsh"]["last_start"]}<br>
+    Error: {file_status["kavyadarsh"]["error"]}</p>
+    <hr>
+    <p><b>Token:</b> File={os.path.exists(TOKEN_FILE)} ENV={bool(os.environ.get("UPSTOX_ACCESS_TOKEN"))}</p>
+    <p><a href="/status">JSON Status</a> | <a href="/ping">Ping</a> | <a href="/">Home</a></p>
+    <p>All PY files: {[f for f in os.listdir('.') if f.endswith('.py')]}</p>
+    </body></html>
+    '''
+    return html
 
 @app.route('/upstox-login')
 def upstox_login():
     api_key=os.environ.get("UPSTOX_API_KEY")
+    if not api_key:
+        return "UPSTOX_API_KEY not set in ENV", 400
     redirect_uri="https://ravialgo.onrender.com/upstox/callback"
     url=f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
     return redirect(url)
@@ -576,51 +241,22 @@ def upstox_callback():
         if access_token:
             with open(TOKEN_FILE,"w") as f: f.write(access_token)
             os.environ["UPSTOX_ACCESS_TOKEN"]=access_token
-            return f"<h1>✅ Token Save!</h1><a href='/flattrade'>FAST App la ja</a>"
+            return f"<h1>✅ Token Save!</h1><p>24x7 mode active - Both files will restart with new token</p><a href='/logs'>Logs</a> | <a href='/status'>Status</a>"
         else: return f"Error: {token_data}"
     except Exception as e: return f"Error: {e}"
 
-def is_market_hours():
-    now=datetime.now(IST)
-    if now.weekday()>=5: return False
-    return now.replace(hour=9,minute=0,second=0) <= now <= now.replace(hour=15,minute=30,second=0)
-
-def run_kavyadarsh():
-    while True:
-        try:
-            if not is_market_hours(): time.sleep(60); continue
-            import KavyaDarsh
-        except: time.sleep(10)
-
-def run_upstox():
-    while True:
-        try:
-            if not is_market_hours(): time.sleep(60); continue
-            if not os.path.exists(TOKEN_FILE): time.sleep(60); continue
-            import Upstock4
-        except: time.sleep(10)
-
-def send_telegram():
-    try:
-        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload={"chat_id": TELEGRAM_CHAT_ID, "text": f"✅ FAST Flattrade DEPLOYED - No Logging, 200ms Speed", "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=5)
-    except: pass
-
-def keep_alive():
-    while True:
-        try:
-            if is_market_hours():
-                try: requests.get('https://ravialgo.onrender.com/ping',timeout=5)
-                except: pass
-            time.sleep(600)
-        except: time.sleep(60)
+# --- START THREADS ---
+print("=== STARTING 24x7 MODE - NO PAPER TRADING, NO MOBILE APP ===")
+print(f"Time: {datetime.now(IST)}")
+check_files()
+print(f"Files: KavyaDarsh exists={file_status['kavyadarsh']['file_exists']} Upstock4 exists={file_status['upstock4']['file_exists']}")
 
 threading.Thread(target=run_kavyadarsh,daemon=True).start()
-threading.Thread(target=send_telegram,daemon=True).start()
 threading.Thread(target=run_upstox,daemon=True).start()
+threading.Thread(target=send_telegram,daemon=True).start()
 threading.Thread(target=keep_alive,daemon=True).start()
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
+    print(f"Flask starting on port {port} - 24x7 mode")
     app.run(host='0.0.0.0',port=port, threaded=True)
