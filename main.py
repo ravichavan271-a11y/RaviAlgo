@@ -309,11 +309,20 @@ def upstox_callback():
 
 print("=== STARTING 24x7 AUTOMATIC TOKEN MODE - MAGACHYA SHEET SARKHA ===")
 check_files()
-threading.Thread(target=run_kavyadarsh,daemon=True).start()
-threading.Thread(target=run_upstox,daemon=True).start()
-threading.Thread(target=send_telegram,daemon=True).start()
-threading.Thread(target=keep_alive,daemon=True).start()
-threading.Thread(target=auto_token_watcher,daemon=True).start()
+
+def start_all_threads():
+    # Delay 5 sec to let gunicorn worker boot fully - fix WORKER TIMEOUT
+    time.sleep(5)
+    print("🚀 Starting background threads after gunicorn boot...")
+    threading.Thread(target=run_kavyadarsh,daemon=True).start()
+    threading.Thread(target=run_upstox,daemon=True).start()
+    threading.Thread(target=send_telegram,daemon=True).start()
+    threading.Thread(target=keep_alive,daemon=True).start()
+    threading.Thread(target=auto_token_watcher,daemon=True).start()
+    print("✅ All background threads started")
+
+# Start threads after small delay - prevents WORKER TIMEOUT
+threading.Thread(target=start_all_threads, daemon=True).start()
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
