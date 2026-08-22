@@ -310,19 +310,30 @@ def upstox_callback():
 print("=== STARTING 24x7 AUTOMATIC TOKEN MODE - MAGACHYA SHEET SARKHA ===")
 check_files()
 
-def start_all_threads():
-    # Delay 5 sec to let gunicorn worker boot fully - fix WORKER TIMEOUT
-    time.sleep(5)
-    print("🚀 Starting background threads after gunicorn boot...")
+# --- FIX: Start threads DIRECTLY - no nested thread wrapper ---
+# Nested threading.Thread inside thread was not starting in gunicorn sync worker
+print("🚀 Starting background threads directly (no delay wrapper)...")
+try:
     threading.Thread(target=run_kavyadarsh,daemon=True).start()
+    print("✅ KavyaDarsh thread started")
+except Exception as e:
+    print(f"❌ KavyaDarsh thread failed: {e}")
+
+try:
     threading.Thread(target=run_upstox,daemon=True).start()
+    print("✅ Upstock4 thread started")
+except Exception as e:
+    print(f"❌ Upstock4 thread failed: {e}")
+
+try:
     threading.Thread(target=send_telegram,daemon=True).start()
     threading.Thread(target=keep_alive,daemon=True).start()
     threading.Thread(target=auto_token_watcher,daemon=True).start()
-    print("✅ All background threads started")
+    print("✅ Helper threads started (Telegram, keep_alive, token watcher)")
+except Exception as e:
+    print(f"❌ Helper threads failed: {e}")
 
-# Start threads after small delay - prevents WORKER TIMEOUT
-threading.Thread(target=start_all_threads, daemon=True).start()
+print("✅ All background threads launched - check /logs for Running: True")
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
