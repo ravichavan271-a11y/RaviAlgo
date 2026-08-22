@@ -9,13 +9,19 @@ import upstox_client
 
 print("FINAL V23 - VOLUME REALTIME + VOL X GREEN ONLY + TELEGRAM ALERT")
 
-UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "eyJ0eXAiOiJKV1QiLCJra2V5X2lkIjoic2tfdjEuMCIsImFsZyI6IkhTMjU2In0.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg3Yzc4MDhmMTJkZjNjMTA4ZTcwNDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3MjgzMzI4LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODczNDk2MDB9.yIA7n61WfpOKtgFvNCWs1iCUQiyID_ClveSskCjuwT4")
+UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
+# Token file varun read kar - Render var file madhe save hoto
+if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
+    try:
+        with open("upstox_token.txt","r") as f:
+            UPSTOX_ACCESS_TOKEN = f.read().strip()
+    except: pass
 SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
 # --- TELEGRAM CONFIG ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8255515384:AAEREJpnfiMkr3vOjBhgRBgCTZNUbPcpyHI")  # Render Env Variable madhe tak
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7602442830")      # Tujha Chat ID
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
