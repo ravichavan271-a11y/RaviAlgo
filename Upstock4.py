@@ -1,4 +1,4 @@
-import gzip, io, time, threading, os, re
+import gzip, io, time, threading, os, re, sys
 from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -7,15 +7,17 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V23 - VOLUME REALTIME + VOL X GREEN ONLY + TELEGRAM ALERT")
+print("FINAL V24 - 24x7 MODE - NO EXIT - AUTO RETRY - VOLUME REALTIME")
 
 UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
-# Token file varun read kar - Render var file madhe save hoto
 if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
     try:
         with open("upstox_token.txt","r") as f:
             UPSTOX_ACCESS_TOKEN = f.read().strip()
-    except: pass
+        print(f"Token loaded from file: {UPSTOX_ACCESS_TOKEN[:10]}...")
+    except Exception as e:
+        print(f"Token file read error: {e}")
+
 SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
@@ -25,25 +27,20 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[TELEGRAM SKIP - Token/Chat ID nahi] {message[:100]}")
+        print(f"[TELEGRAM SKIP] {message[:100]}")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"✅ TELEGRAM ALERT SENT: {message[:80]}")
+            print(f"✅ TELEGRAM: {message[:80]}")
         else:
             print(f"❌ Telegram Error: {resp.text}")
     except Exception as e:
         print(f"❌ Telegram Exception: {e}")
 
-# Alert duplicate roknyasathi
-alerted_symbols = {}  # symbol -> last_status
+alerted_symbols = {}
 
 def parse_date(val):
     if not val: return ""
@@ -54,22 +51,40 @@ def parse_date(val):
         except: pass
     return s[:10]
 
-try:
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
-    sh = gc.open(SPREADSHEET_NAME)
-    sheet = sh.sheet1
-    try:
-        breakout_sheet = sh.worksheet("BREAKOUT")
-    except gspread.exceptions.WorksheetNotFound:
-        breakout_sheet = sh.add_worksheet(title="BREAKOUT", rows="2000", cols="20")
-    weekly_from = parse_date(sheet.cell(2,2).value)
-    weekly_to = parse_date(sheet.cell(3,2).value)
-    print(f"Weekly From: {weekly_from} To: {weekly_to}")
-except Exception as e:
-    print(f"GOOGLE SHEET ERROR: {e}")
-    time.sleep(20)
-    exit()
+# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT ---
+gc = None
+sh = None
+sheet = None
+breakout_sheet = None
+weekly_from = ""
+weekly_to = ""
+
+def connect_sheets():
+    global gc, sh, sheet, breakout_sheet, weekly_from, weekly_to
+    retry = 0
+    while True:
+        try:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to Google Sheets... attempt {retry+1}")
+            scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+            gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+            sh = gc.open(SPREADSHEET_NAME)
+            sheet = sh.sheet1
+            try:
+                breakout_sheet = sh.worksheet("BREAKOUT")
+            except gspread.exceptions.WorksheetNotFound:
+                breakout_sheet = sh.add_worksheet(title="BREAKOUT", rows="2000", cols="20")
+            weekly_from = parse_date(sheet.cell(2,2).value)
+            weekly_to = parse_date(sheet.cell(3,2).value)
+            print(f"✅ Sheets connected! Weekly From: {weekly_from} To: {weekly_to}")
+            return True
+        except Exception as e:
+            retry += 1
+            print(f"❌ GOOGLE SHEET ERROR (attempt {retry}): {e} - Retrying in 30 sec... (NO EXIT - 24x7)")
+            time.sleep(30)
+            if retry % 10 == 0:
+                send_telegram_alert(f"⚠️ Google Sheet connect fail {retry} times: {str(e)[:100]}")
+
+connect_sheets()
 
 STRUCTURE = {
     "NIFTY 50": ["BHARTIARTL","LT","RELIANCE"],
@@ -87,9 +102,19 @@ STRUCTURE = {
 }
 
 print("Downloading instrument list...")
-r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
-with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
-    df = pd.read_csv(gz)
+for attempt in range(5):
+    try:
+        r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
+        with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
+            df = pd.read_csv(gz)
+        print(f"✅ Instrument list downloaded: {len(df)} rows")
+        break
+    except Exception as e:
+        print(f"Instrument download fail {attempt+1}: {e} - retry 10 sec")
+        time.sleep(10)
+else:
+    print("❌ Failed to download instruments after 5 attempts - exiting loop will retry via main.py")
+    df = pd.DataFrame()
 
 mp={}
 for _, row in df.iterrows():
@@ -294,130 +319,178 @@ def setup_permanent_colors():
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": breakout_sheet.id, "startRowIndex": 0, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=VALUE(SUBSTITUTE(INDIRECT(\"R\"&ROW()&\"C\"&COLUMN(),FALSE),\"X\",\"\"))>=1"}]}, "format": {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}}}}, "index": 3}},
         ]
         sh.batch_update({"requests": requests_break})
-        print("COLOR RULES DONE - GREEN ONLY FOR VOL X")
+        print("COLOR RULES DONE")
     except Exception as e:
         print(f"Color rule err {e}")
 
-print("Building sheets...")
-full = build_sorted()
-sheet.update(values=full, range_name="A4")
-breakout_data = build_breakout_sheet()
-breakout_sheet.clear()
-breakout_sheet.update(values=breakout_data, range_name="A1")
-setup_permanent_colors()
-print(f"DONE {len(row_map)} rows")
-
-configuration = upstox_client.Configuration()
-configuration.access_token = UPSTOX_ACCESS_TOKEN
-api_client = upstox_client.ApiClient(configuration)
-streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
-
-pending_updates={}; lock=threading.Lock()
-last_sorted_keys=""
-
-def on_message(message):
-    feeds=message.get("feeds",{})
-    for ikey, feed in feeds.items():
-        if ikey not in instrument_data: continue
-        ltp = None; vol = None
+# Safe sheet update with retry
+def safe_sheet_update():
+    for attempt in range(3):
         try:
-            if "fullFeed" in feed:
-                ff = feed["fullFeed"]
-                if "marketFF" in ff:
-                    mff = ff["marketFF"]
-                    ltp = mff.get("ltpc",{}).get("ltp")
-                    vol = mff.get("vtt")
-                    if not vol:
-                        ohlc_list = mff.get("marketOHLC",{}).get("ohlc",[])
-                        if ohlc_list: vol = ohlc_list[0].get("volume")
-                    if not vol: vol = mff.get("volume")
-                elif "indexFF" in ff:
-                    ltp = ff["indexFF"].get("ltpc",{}).get("ltp"); vol = 0
-            if not ltp and "ltpc" in feed: ltp = feed["ltpc"].get("ltp")
-            with lock:
-                if ltp:
-                    prev_status = get_status(instrument_data[ikey])
-                    instrument_data[ikey]["ltp"]=float(ltp)
-                    pending_updates[ikey]=float(ltp)
-                    new_status=get_status(instrument_data[ikey])
-                    # TELEGRAM ALERT LOGIC - Status badla ki alert
-                    if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
-                        instrument_data[ikey]["break_time"]=datetime.now().strftime("%H:%M:%S")
-                    if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
-                        sym = instrument_data[ikey]["symbol"]
-                        # ekach symbol la ekdach alert per status
-                        last_alert = alerted_symbols.get(sym)
-                        if last_alert != new_status:
-                            volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
-                            dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
-                            emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
-                            msg = (
-                                f"{emoji} <b>{new_status} ALERT - {sym}</b> {emoji}\n\n"
-                                f"💰 LTP: {instrument_data[ikey]['ltp']}\n"
-                                f"📈 Change: {instrument_data[ikey]['change']:.2f}%\n"
-                                f"📊 WH: {instrument_data[ikey]['wh']} | WL: {instrument_data[ikey]['wl']}\n"
-                                f"📦 Vol X: {volx:.1f}X | Dist: {dist:.1f}%\n"
-                                f"⏰ Time: {instrument_data[ikey]['break_time']}\n"
-                                f"🔍 Type: {'INDEX' if instrument_data[ikey]['is_index'] else 'STOCK'}"
-                            )
-                            # Telegram async pathav
-                            threading.Thread(target=send_telegram_alert, args=(msg,), daemon=True).start()
-                            alerted_symbols[sym] = new_status
-                if vol is not None:
-                    try:
-                        v_int = int(float(vol))
-                        if v_int >=0 and not instrument_data[ikey]["is_index"]:
-                            instrument_data[ikey]["vol"] = v_int
-                    except: pass
-        except: pass
+            full = build_sorted()
+            sheet.update(values=full, range_name="A4")
+            breakout_data = build_breakout_sheet()
+            breakout_sheet.clear()
+            breakout_sheet.update(values=breakout_data, range_name="A1")
+            setup_permanent_colors()
+            print(f"DONE {len(row_map)} rows")
+            return True
+        except Exception as e:
+            print(f"Sheet update fail {attempt+1}: {e} - retry 10 sec")
+            time.sleep(10)
+            # Try reconnect sheets
+            try:
+                connect_sheets()
+            except: pass
+    return False
 
-def on_open():
-    print("LIVE CONNECTED - V23 WITH TELEGRAM")
-    send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED</b>\nMarket screener chalu jhala - Breakout alerts active aahet!")
+safe_sheet_update()
 
-streamer.on("open", on_open)
-streamer.on("message", on_message)
-streamer.connect()
-
-def sheet_updater():
-    global last_sorted_keys
-    last_sort=time.time()
+# --- STREAMER WITH AUTO RECONNECT - 24x7 ---
+def start_streamer_with_reconnect():
     while True:
-        time.sleep(1)
-        if time.time()-last_sort>=5:
-            with lock:
-                for ikey, ltp in list(pending_updates.items()):
-                    instrument_data[ikey]["change"]=(ltp-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100 if instrument_data[ikey]["prev_close"]>0 else 0
-                pending_updates.clear()
-                current_order="".join([f"{k}{v['change']:.2f}" for k,v in sorted(instrument_data.items(), key=lambda x: x[1]["change"], reverse=True)][:10])
-                if current_order!=last_sorted_keys:
-                    print("RANK CHANGE - RE-SORTING...")
-                    last_sorted_keys=current_order
-                    full_sorted=build_sorted()
-                    breakout_sorted=build_breakout_sheet()
-                    try:
-                        sheet.update(values=full_sorted, range_name="A4")
-                        breakout_sheet.clear()
-                        breakout_sheet.update(values=breakout_sorted, range_name="A1")
-                    except Exception as e: print(f"Sort err {e}")
-                else:
-                    batch=[]
-                    for ikey, it in instrument_data.items():
-                        sym=it["symbol"]
-                        if sym in row_map:
-                            rnum=row_map[sym]
-                            dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
-                            volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
-                            status=get_status(it)
-                            batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now().strftime("%H:%M:%S")]]})
-                    if batch:
-                        try:
-                            sheet.batch_update(batch)
-                            breakout_sorted=build_breakout_sheet()
-                            breakout_sheet.clear()
-                            breakout_sheet.update(values=breakout_sorted, range_name="A1")
-                        except: pass
-            last_sort=time.time()
+        try:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Upstox Streamer...")
+            # Refresh token each time
+            global UPSTOX_ACCESS_TOKEN
+            UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
+            if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
+                try:
+                    with open("upstox_token.txt","r") as f:
+                        UPSTOX_ACCESS_TOKEN = f.read().strip()
+                except: pass
+            
+            if not UPSTOX_ACCESS_TOKEN:
+                print("❌ No token - waiting 60 sec...")
+                time.sleep(60)
+                continue
+            
+            configuration = upstox_client.Configuration()
+            configuration.access_token = UPSTOX_ACCESS_TOKEN
+            api_client = upstox_client.ApiClient(configuration)
+            streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
 
-threading.Thread(target=sheet_updater, daemon=True).start()
-while True: time.sleep(1)
+            pending_updates={}; lock=threading.Lock()
+            last_sorted_keys=""
+
+            def on_message(message):
+                feeds=message.get("feeds",{})
+                for ikey, feed in feeds.items():
+                    if ikey not in instrument_data: continue
+                    ltp = None; vol = None
+                    try:
+                        if "fullFeed" in feed:
+                            ff = feed["fullFeed"]
+                            if "marketFF" in ff:
+                                mff = ff["marketFF"]
+                                ltp = mff.get("ltpc",{}).get("ltp")
+                                vol = mff.get("vtt")
+                                if not vol:
+                                    ohlc_list = mff.get("marketOHLC",{}).get("ohlc",[])
+                                    if ohlc_list: vol = ohlc_list[0].get("volume")
+                                if not vol: vol = mff.get("volume")
+                            elif "indexFF" in ff:
+                                ltp = ff["indexFF"].get("ltpc",{}).get("ltp"); vol = 0
+                        if not ltp and "ltpc" in feed: ltp = feed["ltpc"].get("ltp")
+                        with lock:
+                            if ltp:
+                                prev_status = get_status(instrument_data[ikey])
+                                instrument_data[ikey]["ltp"]=float(ltp)
+                                pending_updates[ikey]=float(ltp)
+                                new_status=get_status(instrument_data[ikey])
+                                if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
+                                    instrument_data[ikey]["break_time"]=datetime.now().strftime("%H:%M:%S")
+                                if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
+                                    sym = instrument_data[ikey]["symbol"]
+                                    last_alert = alerted_symbols.get(sym)
+                                    if last_alert != new_status:
+                                        volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
+                                        dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
+                                        emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
+                                        msg = (
+                                            f"{emoji} <b>{new_status} ALERT - {sym}</b> {emoji}\n\n"
+                                            f"💰 LTP: {instrument_data[ikey]['ltp']}\n"
+                                            f"📈 Change: {instrument_data[ikey]['change']:.2f}%\n"
+                                            f"📊 WH: {instrument_data[ikey]['wh']} | WL: {instrument_data[ikey]['wl']}\n"
+                                            f"📦 Vol X: {volx:.1f}X | Dist: {dist:.1f}%\n"
+                                            f"⏰ Time: {instrument_data[ikey]['break_time']}\n"
+                                            f"🔍 Type: {'INDEX' if instrument_data[ikey]['is_index'] else 'STOCK'}"
+                                        )
+                                        threading.Thread(target=send_telegram_alert, args=(msg,), daemon=True).start()
+                                        alerted_symbols[sym] = new_status
+                            if vol is not None:
+                                try:
+                                    v_int = int(float(vol))
+                                    if v_int >=0 and not instrument_data[ikey]["is_index"]:
+                                        instrument_data[ikey]["vol"] = v_int
+                                except: pass
+                    except: pass
+
+            def on_open():
+                print("✅ LIVE CONNECTED - V24 24x7 WITH TELEGRAM")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V24 24x7</b>\nMarket screener chalu - Breakout alerts active!")
+
+            streamer.on("open", on_open)
+            streamer.on("message", on_message)
+            streamer.connect()
+
+            def sheet_updater():
+                global last_sorted_keys
+                last_sort=time.time()
+                while True:
+                    time.sleep(1)
+                    if time.time()-last_sort>=5:
+                        with lock:
+                            for ikey, ltp in list(pending_updates.items()):
+                                instrument_data[ikey]["change"]=(ltp-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100 if instrument_data[ikey]["prev_close"]>0 else 0
+                            pending_updates.clear()
+                            current_order="".join([f"{k}{v['change']:.2f}" for k,v in sorted(instrument_data.items(), key=lambda x: x[1]["change"], reverse=True)][:10])
+                            if current_order!=last_sorted_keys:
+                                print("RANK CHANGE - RE-SORTING...")
+                                last_sorted_keys=current_order
+                                full_sorted=build_sorted()
+                                breakout_sorted=build_breakout_sheet()
+                                try:
+                                    sheet.update(values=full_sorted, range_name="A4")
+                                    breakout_sheet.clear()
+                                    breakout_sheet.update(values=breakout_sorted, range_name="A1")
+                                except Exception as e: 
+                                    print(f"Sort err {e} - reconnecting sheets")
+                                    try: connect_sheets()
+                                    except: pass
+                            else:
+                                batch=[]
+                                for ikey, it in instrument_data.items():
+                                    sym=it["symbol"]
+                                    if sym in row_map:
+                                        rnum=row_map[sym]
+                                        dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
+                                        volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
+                                        status=get_status(it)
+                                        batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now().strftime("%H:%M:%S")]]})
+                                if batch:
+                                    try:
+                                        sheet.batch_update(batch)
+                                        breakout_sorted=build_breakout_sheet()
+                                        breakout_sheet.clear()
+                                        breakout_sheet.update(values=breakout_sorted, range_name="A1")
+                                    except Exception as e:
+                                        print(f"Batch update err {e} - reconnecting")
+                                        try: connect_sheets()
+                                        except: pass
+                        last_sort=time.time()
+
+            threading.Thread(target=sheet_updater,daemon=True).start()
+            
+            # Keep this thread alive - streamer runs in its own thread
+            while True:
+                time.sleep(10)
+                
+        except Exception as e:
+            import traceback
+            print(f"❌ Streamer crashed: {e} - Reconnecting in 15 sec...\n{traceback.format_exc()[:500]}")
+            send_telegram_alert(f"⚠️ Streamer crash: {str(e)[:100]} - Reconnecting...")
+            time.sleep(15)
+
+# Start 24x7 loop - never exit
+start_streamer_with_reconnect()
