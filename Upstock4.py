@@ -7,30 +7,8 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V25 - 24x7 MODE - V22 WORKING + V24 RETRY - NO EXIT")
+print("FINAL V27 - AUTOMATIC TOKEN - SHEET + FILE + ENV - 24x7 MODE")
 
-# --- TOKEN LOGIC - 3 LEVEL: ENV > FILE > HARDCODED (FALLBACK) ---
-# ENV token sabse pehle (Render var se aayega)
-UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
-
-# File se token (upstox_token.txt)
-if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
-    try:
-        with open("upstox_token.txt","r") as f:
-            UPSTOX_ACCESS_TOKEN = f.read().strip()
-        print(f"Token loaded from file: {UPSTOX_ACCESS_TOKEN[:15]}...")
-    except Exception as e:
-        print(f"Token file read error: {e}")
-
-# Last fallback - Hardcoded (V22 wala - agar ENV/file nahi to ye chalega)
-if not UPSTOX_ACCESS_TOKEN:
-    UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJraV9pZCI6InNrX3YxLjAiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg5OWYzYzUwY2IxYTU3NGNmZThhNTIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3NDA0MDkyLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODc0MzYwMDB9.NvjzADtl9VPO-vlGFrrz7eY-RXZ6_kOz-4tp9Cjbr3s"
-    print(f"Using FALLBACK hardcoded token: {UPSTOX_ACCESS_TOKEN[:15]}...")
-
-SPREADSHEET_NAME = "Dsheet"
-SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
-
-# --- TELEGRAM CONFIG (V24 se) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -49,6 +27,82 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"Telegram Exception: {e}")
 
+SPREADSHEET_NAME = "Dsheet"
+SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
+
+def get_automatic_token():
+    tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
+    if tok:
+        print(f"✅ Token from ENV: {tok[:15]}...")
+        return tok
+    if os.path.exists("upstox_token.txt"):
+        try:
+            with open("upstox_token.txt","r") as f:
+                tok = f.read().strip()
+            if tok and len(tok) > 50:
+                print(f"✅ Token from FILE: {tok[:15]}...")
+                os.environ["UPSTOX_ACCESS_TOKEN"] = tok
+                return tok
+        except Exception as e:
+            print(f"File token error: {e}")
+    try:
+        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+        sh = gc.open(SPREADSHEET_NAME)
+        try:
+            sheet1 = sh.sheet1
+            b1_token = sheet1.cell(1,2).value
+            if b1_token and len(str(b1_token)) > 50 and "eyJ" in str(b1_token):
+                print(f"✅ Token from SHEET B1: {str(b1_token)[:15]}...")
+                with open("upstox_token.txt","w") as f:
+                    f.write(str(b1_token).strip())
+                os.environ["UPSTOX_ACCESS_TOKEN"] = str(b1_token).strip()
+                return str(b1_token).strip()
+        except: pass
+        try:
+            token_sheet = sh.worksheet("TOKEN")
+            sheet_token = token_sheet.cell(1,1).value or token_sheet.cell(1,2).value
+            if sheet_token and len(str(sheet_token)) > 50 and "eyJ" in str(sheet_token):
+                print(f"✅ Token from TOKEN sheet: {str(sheet_token)[:15]}...")
+                with open("upstox_token.txt","w") as f:
+                    f.write(str(sheet_token).strip())
+                os.environ["UPSTOX_ACCESS_TOKEN"] = str(sheet_token).strip()
+                return str(sheet_token).strip()
+        except: pass
+    except Exception as e:
+        print(f"Sheet token fetch error (ignore): {e}")
+    fallback = "eyJ0eXAiOiJKV1QiLCJraV9pZCI6InNrX3YxLjAiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI4MkJKV1EiLCJqdGkiOiI2YTg5OWYzYzUwY2IxYTU3NGNmZThhNTIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzg3NDA0MDkyLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODc0MzYwMDB9.NvjzADtl9VPO-vlGFrrz7eY-RXZ6_kOz-4tp9Cjbr3s"
+    print(f"⚠️ Using FALLBACK token: {fallback[:15]}...")
+    return fallback
+
+UPSTOX_ACCESS_TOKEN = get_automatic_token()
+
+def is_token_valid(token):
+    try:
+        url = "https://api.upstox.com/v2/user/profile"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if resp.status_code == 200:
+            print("✅ Token VALID")
+            return True
+        else:
+            print(f"❌ Token INVALID: {resp.status_code} - {resp.text[:100]}")
+            return False
+    except Exception as e:
+        print(f"Token valid check error: {e}")
+        return True
+
+if not is_token_valid(UPSTOX_ACCESS_TOKEN):
+    msg = f"⚠️ <b>Upstox Token Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now().strftime('%H:%M:%S')}"
+    send_telegram_alert(msg)
+    print("⚠️ TOKEN EXPIRED - Telegram alert sent")
+    for i in range(6):
+        time.sleep(10)
+        new_tok = get_automatic_token()
+        if new_tok != UPSTOX_ACCESS_TOKEN and is_token_valid(new_tok):
+            UPSTOX_ACCESS_TOKEN = new_tok
+            print("✅ New token found and valid!")
+            break
+
 alerted_symbols = {}
 
 def parse_date(val):
@@ -60,7 +114,7 @@ def parse_date(val):
         except: pass
     return s[:10]
 
-# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT (V24 logic) ---
+# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT ---
 gc = None
 sh = None
 sheet = None
@@ -111,7 +165,6 @@ STRUCTURE = {
 }
 
 print("Downloading instrument list...")
-# 5 times retry (V24 logic)
 for attempt in range(5):
     try:
         r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
@@ -123,7 +176,7 @@ for attempt in range(5):
         print(f"Instrument download fail {attempt+1}: {e} - retry 10 sec")
         time.sleep(10)
 else:
-    print("❌ Failed to download instruments after 5 attempts - will retry via main.py")
+    print("❌ Failed to download instruments after 5 attempts - exiting loop will retry via main.py")
     df = pd.DataFrame()
 
 mp={}
@@ -329,24 +382,52 @@ def setup_permanent_colors():
             {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": breakout_sheet.id, "startRowIndex": 0, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=VALUE(SUBSTITUTE(INDIRECT(\"R\"&ROW()&\"C\"&COLUMN(),FALSE),\"X\",\"\"))>=1"}]}, "format": {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}}}}, "index": 3}},
         ]
         sh.batch_update({"requests": requests_break})
-        print("COLOR RULES DONE - GREEN ONLY FOR VOL X")
+        print("COLOR RULES DONE")
     except Exception as e:
         print(f"Color rule err {e}")
 
-print("Building sheets...")
-full = build_sorted()
-sheet.update(values=full, range_name="A4")
-breakout_data = build_breakout_sheet()
-breakout_sheet.clear()
-breakout_sheet.update(values=breakout_data, range_name="A1")
-setup_permanent_colors()
-print(f"DONE {len(row_map)} rows - V22 LOGIC SUCCESS")
+# Safe sheet update with retry
+def safe_sheet_update():
+    for attempt in range(3):
+        try:
+            full = build_sorted()
+            sheet.update(values=full, range_name="A4")
+            breakout_data = build_breakout_sheet()
+            breakout_sheet.clear()
+            breakout_sheet.update(values=breakout_data, range_name="A1")
+            setup_permanent_colors()
+            print(f"DONE {len(row_map)} rows")
+            return True
+        except Exception as e:
+            print(f"Sheet update fail {attempt+1}: {e} - retry 10 sec")
+            time.sleep(10)
+            # Try reconnect sheets
+            try:
+                connect_sheets()
+            except: pass
+    return False
 
-# --- STREAMER WITH 24x7 RECONNECT LOOP (V24 logic + V22 working code) ---
+safe_sheet_update()
+
+# --- STREAMER WITH AUTO RECONNECT - 24x7 ---
 def start_streamer_with_reconnect():
     while True:
         try:
-            print("Starting streamer with reconnect loop - V25 FINAL")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Upstox Streamer...")
+            # Refresh token each time
+            global UPSTOX_ACCESS_TOKEN
+            UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
+            if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
+                try:
+                    with open("upstox_token.txt","r") as f:
+                        UPSTOX_ACCESS_TOKEN = f.read().strip()
+                except: pass
+            
+            if not UPSTOX_ACCESS_TOKEN:
+                print("❌ No token - waiting 60 sec...")
+                time.sleep(60)
+                continue
+            
             configuration = upstox_client.Configuration()
             configuration.access_token = UPSTOX_ACCESS_TOKEN
             api_client = upstox_client.ApiClient(configuration)
@@ -409,8 +490,8 @@ def start_streamer_with_reconnect():
                     except: pass
 
             def on_open():
-                print("✅ LIVE CONNECTED - V25 FINAL - V22 WORKING + V24 24x7")
-                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V25 FINAL</b>\nV22 working logic + V24 24x7 - Market screener chalu!")
+                print("✅ LIVE CONNECTED - V24 24x7 WITH TELEGRAM")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V24 24x7</b>\nMarket screener chalu - Breakout alerts active!")
 
             streamer.on("open", on_open)
             streamer.on("message", on_message)
