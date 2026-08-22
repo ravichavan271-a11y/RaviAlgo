@@ -50,7 +50,7 @@ def home():
     <h3>System Check:</h3>
     <p>📄 Google Sheet: {ce}</p>
     <p>📈 Upstox Token: {te}</p>
-    <p>📱 Telegram: {tg} -> Chat TELEGRAM_CHAT_ID or "Not Set"</p>
+    <p>📱 Telegram: {tg} -> Chat {TELEGRAM_CHAT_ID or "Not Set"}</p>
     <p>🧵 Threads: {len(threads)} active ({thread_list})</p>
     <p>🔄 Keep Alive: Active (10 min self ping)</p>
     <p>🌐 UptimeRobot: Active (5 min ping to /ping)</p>
