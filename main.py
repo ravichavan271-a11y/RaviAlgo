@@ -47,36 +47,54 @@ def load_instruments():
     try:
         r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
         with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
-            df = pd.read_csv(gz, usecols=lambda c: c in ["tradingsymbol","instrument_key","name","short_name","exchange"])
+            df = pd.read_csv(gz)
         mp={}
         lst=[]
+        # Counters
+        eq_count=0; fo_count=0; idx_count=0
         for _, row in df.iterrows():
             sym=str(row.get("tradingsymbol","")).strip()
             key=str(row.get("instrument_key","")).strip()
-            name=str(row.get("name","") or row.get("short_name","") or "")
+            name=str(row.get("short_name","") or row.get("name","") or row.get("tradingsymbol","") or "")
+            exch=str(row.get("exchange",""))
             if not sym or not key: continue
-            lst.append({"symbol":sym,"key":key,"name":name})
+            # Include NSE_EQ, NSE_FO, NSE_INDEX, BSE, etc
+            if "NSE" not in key and "BSE" not in key:
+                continue
+            lst.append({"symbol":sym,"key":key,"name":name,"exchange":exch})
             if "NSE_EQ" in key:
                 mp[sym]=key
-                if sym.endswith("-EQ"): mp[sym.replace("-EQ","")]=key
+                eq_count+=1
+                if sym.endswith("-EQ"):
+                    clean=sym.replace("-EQ","")
+                    mp[clean]=key
+                    lst.append({"symbol":clean,"key":key,"name":name,"exchange":exch})
             elif "NSE_INDEX" in key:
                 mp[sym]=key
-                if "Nifty 50" in key: mp["NIFTY 50"]=key; mp["NIFTY"]=key
-                if "Nifty Bank" in key: mp["NIFTY BANK"]=key; mp["BANKNIFTY"]=key
-                if "Nifty Fin" in key: mp["FINNIFTY"]=key
+                idx_count+=1
+                if "Nifty 50" in key or "NIFTY 50" in sym.upper(): mp["NIFTY 50"]=key; mp["NIFTY"]=key
+                if "Nifty Bank" in key or "BANKNIFTY" in sym.upper(): mp["NIFTY BANK"]=key; mp["BANKNIFTY"]=key
+                if "Fin" in key: mp["FINNIFTY"]=key
             elif "NSE_FO" in key:
                 mp[sym]=key
-            elif sym not in mp:
-                mp[sym]=key
+                fo_count+=1
+                # Also add without date for easier search? e.g. NIFTY24200CE
+                # Keep original
+            else:
+                if sym not in mp:
+                    mp[sym]=key
         mp["M&M"]="NSE_EQ|INE101A01026"
         mp["NIFTY 50"]="NSE_INDEX|Nifty 50"; mp["NIFTY"]="NSE_INDEX|Nifty 50"
         mp["NIFTY BANK"]="NSE_INDEX|Nifty Bank"; mp["BANKNIFTY"]="NSE_INDEX|Nifty Bank"
         mp["FINNIFTY"]="NSE_INDEX|Nifty Fin Service"
+        mp["SENSEX"]="BSE_INDEX|SENSEX"
         with instrument_list_lock:
             instrument_cache=mp
             instrument_list=lst
+        print(f"INSTRUMENTS LOADED: EQ={eq_count} FO={fo_count} IDX={idx_count} TOTAL={len(lst)}")
         return mp
     except Exception as e:
+        print(f"load_instruments error: {e}")
         return {}
 
 def load_paper_from_disk():
@@ -238,12 +256,20 @@ def home():
     # Ultra robust - try all possible paths on Render
     possible_paths = [
         'mobile_app.html',
+        'mobile-app.html',
+        'Mobile-App.html',
         './mobile_app.html',
+        './mobile-app.html',
         os.path.join(os.getcwd(), 'mobile_app.html'),
+        os.path.join(os.getcwd(), 'mobile-app.html'),
         os.path.join(os.path.dirname(__file__), 'mobile_app.html'),
+        os.path.join(os.path.dirname(__file__), 'mobile-app.html'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobile_app.html'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobile-app.html'),
         '/opt/render/project/src/mobile_app.html',
-        '/mnt/data/mobile_app.html'
+        '/opt/render/project/src/mobile-app.html',
+        '/mnt/data/mobile_app.html',
+        '/mnt/data/mobile-app.html'
     ]
     html_path = None
     checked = []
@@ -271,25 +297,35 @@ def home():
 def api_search():
     q = request.args.get('q','').strip().upper()
     if not q: return jsonify({"results":[]})
+    # Tokenize query: split by space, remove empty
+    tokens = [t for t in q.replace('  ',' ').split(' ') if t]
     mp = load_instruments()
     with instrument_list_lock:
         ilist = list(instrument_list)
     results=[]
     for item in ilist:
-        sym=item["symbol"]
-        if q in sym:
+        sym=item["symbol"].upper()
+        # Check if ALL tokens are present in symbol (space independent)
+        match = all(tok in sym for tok in tokens)
+        # Also try without spaces: join tokens
+        if not match:
+            # e.g. NIFTY 24200 CE -> check NIFTY24200CE in sym
+            joined = ''.join(tokens)
+            match = joined in sym.replace(' ','')
+        if match:
             if "NSE_FO" in item["key"]:
                 opt_type="CE" if sym.endswith("CE") else "PE" if sym.endswith("PE") else "FUT"
-                results.append({"symbol":sym,"key":item["key"],"type":"OPT" if opt_type in ["CE","PE"] else "FUT","opt_type":opt_type,"name":item["name"]})
+                results.append({"symbol":item["symbol"],"key":item["key"],"type":"OPT" if opt_type in ["CE","PE"] else "FUT","opt_type":opt_type,"name":item["name"]})
             elif "NSE_INDEX" in item["key"]:
-                results.append({"symbol":sym,"key":item["key"],"type":"INDEX","name":item["name"]})
+                results.append({"symbol":item["symbol"],"key":item["key"],"type":"INDEX","name":item["name"]})
             elif "NSE_EQ" in item["key"]:
-                results.append({"symbol":sym.replace("-EQ",""),"key":item["key"],"type":"EQ","name":item["name"]})
+                results.append({"symbol":item["symbol"].replace("-EQ",""),"key":item["key"],"type":"EQ","name":item["name"]})
             if len(results)>=40: break
     if len(results)<5:
         for k,v in mp.items():
-            if q in k and k not in [r["symbol"] for r in results]:
-                results.append({"symbol":k,"key":v,"type":"OPT" if "FO" in v else "INDEX" if "INDEX" in v else "EQ","opt_type":"CE" if "CE" in k else "PE","name":""})
+            ku=k.upper()
+            if all(tok in ku for tok in tokens) and k not in [r["symbol"] for r in results]:
+                results.append({"symbol":k,"key":v,"type":"OPT" if "FO" in v else "INDEX" if "INDEX" in v else "EQ","opt_type":"CE" if "CE" in ku else "PE","name":""})
             if len(results)>=40: break
     with live_ltp_lock: ltp_copy=dict(live_ltp)
     for r in results:
