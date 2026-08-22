@@ -235,8 +235,37 @@ def manifest():
 @app.route('/mobile')
 @app.route('/paper-trading')
 def home():
-    html = open('/mnt/data/mobile_app.html', encoding='utf-8').read()
-    return render_template_string(html)
+    # Ultra robust - try all possible paths on Render
+    possible_paths = [
+        'mobile_app.html',
+        './mobile_app.html',
+        os.path.join(os.getcwd(), 'mobile_app.html'),
+        os.path.join(os.path.dirname(__file__), 'mobile_app.html'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobile_app.html'),
+        '/opt/render/project/src/mobile_app.html',
+        '/mnt/data/mobile_app.html'
+    ]
+    html_path = None
+    checked = []
+    for p in possible_paths:
+        checked.append(p)
+        if os.path.exists(p):
+            html_path = p
+            break
+    if not html_path:
+        # Debug - show what files exist in current dir
+        try:
+            files = os.listdir('.')
+            files2 = os.listdir(os.path.dirname(__file__)) if os.path.exists(os.path.dirname(__file__)) else []
+            return f"<h2>mobile_app.html not found</h2><p>Checked: {checked}</p><p>Current dir files: {files}</p><p>Script dir files: {files2}</p><p>cwd: {os.getcwd()}</p><p>__file__: {__file__}</p>", 404
+        except Exception as e:
+            return f"<h2>mobile_app.html not found: {e}</h2><p>Checked: {checked}</p>", 404
+    try:
+        html = open(html_path, encoding='utf-8').read()
+        return render_template_string(html)
+    except Exception as e:
+        return f"<h2>Error reading {html_path}: {e}</h2>", 500
+
 
 @app.route('/api/search')
 def api_search():
