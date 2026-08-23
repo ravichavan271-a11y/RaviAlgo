@@ -10,7 +10,29 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V27 - AUTOMATIC TOKEN - SHEET + FILE + ENV - 24x7 MODE - IST FIX")
+print("FINAL V28 - MARKET HOURS 9:00 to 15:30 IST - AUTOMATIC TOKEN - IST FIX")
+
+# --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
+def is_market_open():
+    now = datetime.now(IST)
+    if now.weekday() >= 5:  # Sat, Sun
+        return False
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_start <= now <= market_end
+
+def get_market_status_msg():
+    now = datetime.now(IST)
+    if now.weekday() >=5:
+        return f"Weekend - Market Band - {now.strftime('%A %H:%M:%S IST')}"
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now < market_start:
+        return f"Market Ajun Open Nahi - Open 9:00 AM - Ata {now.strftime('%H:%M:%S IST')}"
+    elif now > market_end:
+        return f"Market Band Jhala - 3:30 PM - Ata {now.strftime('%H:%M:%S IST')}"
+    else:
+        return f"Market Chalu Aahe - {now.strftime('%H:%M:%S IST')}"
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -492,11 +514,16 @@ def safe_sheet_update():
 
 safe_sheet_update()
 
-# --- STREAMER WITH AUTO RECONNECT - 24x7 ---
+# --- STREAMER WITH AUTO RECONNECT - MARKET HOURS 9:00 to 15:30 ONLY ---
 def start_streamer_with_reconnect():
     while True:
+        # --- MARKET HOURS CHECK ---
+        if not is_market_open():
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - Upstock4 Streamer Sleep 60 sec...")
+            time.sleep(60)
+            continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer...")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer - MARKET HOURS 9:00-15:30...")
             # Refresh token each time
             global UPSTOX_ACCESS_TOKEN
             UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
