@@ -24,7 +24,8 @@ def send_telegram_alert(message):
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"TELEGRAM: {message[:80]}")
+            # Show full message in log - not truncated 80 chars
+            print(f"TELEGRAM: {message}")
         else:
             print(f"Telegram Error: {resp.text}")
     except Exception as e:
@@ -541,6 +542,9 @@ def start_streamer_with_reconnect():
                             if ltp:
                                 prev_status = get_status(instrument_data[ikey])
                                 instrument_data[ikey]["ltp"]=float(ltp)
+                                # --- FIX: Calculate change immediately - not 0.00% bug ---
+                                if instrument_data[ikey]["prev_close"]>0:
+                                    instrument_data[ikey]["change"]=(float(ltp)-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
                                 pending_updates[ikey]=float(ltp)
                                 new_status=get_status(instrument_data[ikey])
                                 if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
@@ -552,13 +556,15 @@ def start_streamer_with_reconnect():
                                         volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
                                         dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
                                         emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
+                                        # Full data for telegram - not truncated
+                                        chg_val = instrument_data[ikey]['change']
                                         msg = (
                                             f"{emoji} <b>{new_status} ALERT - {sym}</b> {emoji}\n\n"
-                                            f"💰 LTP: {instrument_data[ikey]['ltp']}\n"
-                                            f"📈 Change: {instrument_data[ikey]['change']:.2f}%\n"
-                                            f"📊 WH: {instrument_data[ikey]['wh']} | WL: {instrument_data[ikey]['wl']}\n"
+                                            f"💰 LTP: {instrument_data[ikey]['ltp']:.2f}\n"
+                                            f"📈 Change: {chg_val:.2f}%\n"
+                                            f"📊 WH: {instrument_data[ikey]['wh']:.2f} | WL: {instrument_data[ikey]['wl']:.2f}\n"
                                             f"📦 Vol X: {volx:.1f}X | Dist: {dist:.1f}%\n"
-                                            f"⏰ Time: {instrument_data[ikey]['break_time']}\n"
+                                            f"⏰ Time: {instrument_data[ikey]['break_time']} IST\n"
                                             f"🔍 Type: {'INDEX' if instrument_data[ikey]['is_index'] else 'STOCK'}"
                                         )
                                         threading.Thread(target=send_telegram_alert, args=(msg,), daemon=True).start()
