@@ -30,6 +30,52 @@ def send_telegram_alert(message):
 SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
+def get_gspread_client():
+    """Get gspread client from FILE, SECRET FILE, or ENV GOOGLE_SERVICE_ACCOUNT_JSON"""
+    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+    # 1. Try multiple file paths - including Render Secret Files
+    possible_paths = [
+        SERVICE_ACCOUNT_FILE,
+        "./service_account.json",
+        "/etc/secrets/service_account.json",
+        "/etc/secrets/SERVICE_ACCOUNT_JSON",
+        "service_account.json",
+        os.path.join(os.getcwd(), "service_account.json")
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                print(f"✅ Using service_account.json FILE at {path}")
+                return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(path, scope))
+            except Exception as e:
+                print(f"❌ File auth failed at {path}: {e}")
+    # 2. Try ENV JSON
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("GOOGLE_CREDENTIALS", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+    if env_json:
+        try:
+            import json as js
+            creds_dict = js.loads(env_json)
+            print(f"✅ Using service_account from ENV GOOGLE_SERVICE_ACCOUNT_JSON (length {len(env_json)})")
+            return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
+        except Exception as e:
+            print(f"❌ ENV auth failed: {e} - length {len(env_json)}")
+            # Try writing ENV to file and use it
+            try:
+                with open(SERVICE_ACCOUNT_FILE, "w") as f:
+                    f.write(env_json)
+                print(f"✅ Wrote ENV to {SERVICE_ACCOUNT_FILE}, trying file auth")
+                return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+            except Exception as e2:
+                print(f"❌ ENV to file auth also failed: {e2}")
+    print(f"❌ NO service_account found! Checked paths {possible_paths} and ENV GOOGLE_SERVICE_ACCOUNT_JSON")
+    # List files for debug
+    try:
+        print(f"📁 Current dir files: {os.listdir('.')[:20]}")
+        if os.path.exists("/etc/secrets"):
+            print(f"📁 /etc/secrets files: {os.listdir('/etc/secrets')[:20]}")
+    except: pass
+    raise Exception("service_account.json missing - add FILE or ENV GOOGLE_SERVICE_ACCOUNT_JSON")
+
 def get_automatic_token():
     # 1. ENV
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
@@ -49,9 +95,8 @@ def get_automatic_token():
             print(f"File token error: {e}")
     # 3. SHEET B1 + TOKEN sheet
     try:
-        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
-        sh = gc.open(SPREADSHEET_NAME)
+        gc_temp = get_gspread_client()
+        sh = gc_temp.open(SPREADSHEET_NAME)
         try:
             sheet1 = sh.sheet1
             b1_token = sheet1.cell(1,2).value
@@ -61,7 +106,8 @@ def get_automatic_token():
                     f.write(str(b1_token).strip())
                 os.environ["UPSTOX_ACCESS_TOKEN"] = str(b1_token).strip()
                 return str(b1_token).strip()
-        except: pass
+        except Exception as e:
+            print(f"B1 token fetch error: {e}")
         try:
             token_sheet = sh.worksheet("TOKEN")
             sheet_token = token_sheet.cell(1,1).value or token_sheet.cell(1,2).value
@@ -71,9 +117,10 @@ def get_automatic_token():
                     f.write(str(sheet_token).strip())
                 os.environ["UPSTOX_ACCESS_TOKEN"] = str(sheet_token).strip()
                 return str(sheet_token).strip()
-        except: pass
+        except Exception as e:
+            print(f"TOKEN sheet fetch error: {e}")
     except Exception as e:
-        print(f"Sheet token fetch error (ignore): {e}")
+        print(f"Sheet token fetch error: {e}")
     # NO FALLBACK - return empty, wait for valid token
     print("⚠️ No token found - will wait for /upstox-login")
     return ""
@@ -137,8 +184,7 @@ def connect_sheets():
     while True:
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to Google Sheets... attempt {retry+1}")
-            scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-            gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+            gc = get_gspread_client()
             sh = gc.open(SPREADSHEET_NAME)
             sheet = sh.sheet1
             try:
