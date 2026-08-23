@@ -15,6 +15,28 @@ API_KEY="f9323UZL"; CLIENT_ID="R295164"; PIN="2485"; TOTP_SECRET="VREKBLJ6LITKUQ
 SPREADSHEET_NAME="KavyaDarsh"; CACHE="hist.json"
 IST = timezone('Asia/Kolkata')
 
+# --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
+def is_market_open():
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_start <= now <= market_end
+
+def get_market_status_msg():
+    now = datetime.now(IST)
+    if now.weekday() >=5:
+        return f"Weekend - Market Band - {now.strftime('%A %H:%M:%S IST')}"
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now < market_start:
+        return f"Market Ajun Open Nahi - Open 9:00 AM - Ata {now.strftime('%H:%M:%S IST')}"
+    elif now > market_end:
+        return f"Market Band Jhala - 3:30 PM - Ata {now.strftime('%H:%M:%S IST')}"
+    else:
+        return f"Market Chalu Aahe - {now.strftime('%H:%M:%S IST')}"
+
 def get_service_account_file():
     possible_paths = [
         "service_account.json",
@@ -220,7 +242,7 @@ def apply_colour_formatting(sheet):
         print(f"✅ Colour Applied to {sheet.title}")
     except Exception as e: print(f"Colour Error {sheet.title}:", e)
 
-print("=== KAVYADARSH V40 - IST FIX - 24x7 ===")
+print("=== KAVYADARSH V41 - MARKET HOURS 9:00 to 15:30 IST ===")
 obj=login(); fetch_all(obj); start_ws(obj)
 scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds=ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
@@ -240,9 +262,14 @@ apply_colour_formatting(sheet1)
 sheet2.clear(); sheet2.update(values=header_action+build_action_rows(), range_name="A1")
 apply_colour_formatting(sheet2)
 
-print("\n▶ LIVE STARTED - SHEET1: MAIN | SHEET2: ACTION_LIVE (Breakout varati, Breakdown khali, Latest Time) - IST TIME\n")
+print("\n▶ LIVE STARTED - MARKET HOURS 9:00 AM to 3:30 PM IST ONLY - Mon-Fri\n")
 while True:
     try:
+        # --- MARKET HOURS CHECK 9:00 to 3:30 ---
+        if not is_market_open():
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - KavyaDarsh Sleep 60 sec...")
+            time.sleep(60)
+            continue
         sheet1.update(values=build_main_rows(), range_name="A4")
         sheet2.update(values=build_action_rows(), range_name="A4")
         print(f"🔄 {datetime.now(IST).strftime('%H:%M:%S IST')} Updated | MAIN:{len(build_main_rows())} ACTION:{len(build_action_rows())}")
