@@ -31,8 +31,31 @@ TOKEN_FILE = "upstox_token.txt"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
 
+# --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
+def is_market_open():
+    now = datetime.now(IST)
+    # Monday=0 ... Sunday=6, market open Mon-Fri only
+    if now.weekday() >= 5:  # Sat, Sun
+        return False
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_start <= now <= market_end
+
+def get_market_status_msg():
+    now = datetime.now(IST)
+    if now.weekday() >=5:
+        return f"Weekend - Market Band - {now.strftime('%A %H:%M:%S IST')}"
+    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now < market_start:
+        return f"Market Ajun Open Nahi - Open 9:00 AM - Ata {now.strftime('%H:%M:%S IST')}"
+    elif now > market_end:
+        return f"Market Band Jhala - 3:30 PM - Ata {now.strftime('%H:%M:%S IST')}"
+    else:
+        return f"Market Chalu Aahe - {now.strftime('%H:%M:%S IST')}"
+
 app = Flask(__name__)
-RUN_24_7 = True
+RUN_24_7 = False  # Ata 9:00 to 3:30 only - not 24x7
 
 def send_telegram_msg(text):
     try:
@@ -147,8 +170,14 @@ def run_kavyadarsh():
     global file_status
     check_files()
     while True:
+        # --- MARKET HOURS CHECK 9:00 to 3:30 ---
+        if not is_market_open():
+            file_status["kavyadarsh"]["running"] = False
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - KavyaDarsh Sleep 60 sec...")
+            time.sleep(60)
+            continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - 24x7 MODE (Angel One - Auto TOTP)")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - MARKET HOURS 9:00-3:30 (Angel One - Auto TOTP)")
             # Auto-install pyotp before import
             try:
                 import pyotp
@@ -184,8 +213,14 @@ def run_upstox():
     global file_status
     check_files()
     while True:
+        # --- MARKET HOURS CHECK 9:00 to 3:30 ---
+        if not is_market_open():
+            file_status["upstock4"]["running"] = False
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - Upstock4 Sleep 60 sec...")
+            time.sleep(60)
+            continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - AUTOMATIC TOKEN MODE (Magachya sheet sarkha)")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - MARKET HOURS 9:00-3:30 (Magachya sheet sarkha)")
             file_status["upstock4"]["running"] = True
             file_status["upstock4"]["last_start"] = datetime.now(IST).isoformat()
             file_status["upstock4"]["count"] += 1
