@@ -1,13 +1,51 @@
-import pyotp, time, threading, pandas as pd, json, os
+import pyotp, time, threading, pandas as pd, json, os, sys, subprocess
 from datetime import datetime, timedelta
 from pytz import timezone
-from SmartApi import SmartConnect
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+try:
+    from SmartApi import SmartConnect
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "smartapi-python"])
+    from SmartApi import SmartConnect
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 API_KEY="f9323UZL"; CLIENT_ID="R295164"; PIN="2485"; TOTP_SECRET="VREKBLJ6LITKUQLSLAEU55ZYPM"
-SERVICE_ACCOUNT_FILE="creds.json"; SPREADSHEET_NAME="KavyaDarsh"; CACHE="hist.json"
+SPREADSHEET_NAME="KavyaDarsh"; CACHE="hist.json"
+IST = timezone('Asia/Kolkata')
+
+def get_service_account_file():
+    possible_paths = [
+        "service_account.json",
+        "./service_account.json",
+        "/etc/secrets/service_account.json",
+        "/etc/secrets/SERVICE_ACCOUNT_JSON",
+        "creds.json",
+        "./creds.json",
+        "/etc/secrets/creds.json",
+        os.path.join(os.getcwd(), "service_account.json")
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            print(f"✅ Using service_account FILE at {p}")
+            return p
+    # Try ENV
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+    if env_json:
+        try:
+            import json as js
+            js.loads(env_json)
+            with open("service_account.json", "w") as f:
+                f.write(env_json)
+            print("✅ Wrote ENV to service_account.json")
+            return "service_account.json"
+        except Exception as e:
+            print(f"ENV write fail: {e}")
+    print("❌ No service_account file found - checked", possible_paths)
+    return "service_account.json"
+
+SERVICE_ACCOUNT_FILE = get_service_account_file()
 
 NIFTY_INDICES = {"NIFTY 50": "99926000", "NIFTY BANK": "99926009", "NIFTY FIN SERVICE": "99926037","NIFTY IT": "99926008", "NIFTY AUTO": "99926029", "NIFTY PHARMA": "99926023","NIFTY FMCG": "99926021", "NIFTY METAL": "99926030", "NIFTY ENERGY": "99926020","NIFTY PSE": "99926024", "NIFTY MID SELECT": "99926074"}
 INDEX_MAP = {"BANK": ["HDFCBANK","ICICIBANK","SBIN","AXISBANK","KOTAKBANK","INDUSINDBK","BANKBARODA","PNB","CANBK","AUBANK","BAJFINANCE"],"IT": ["INFY","TCS","HCLTECH","WIPRO","TECHM","PERSISTENT","COFORGE","OFSS","MPHASIS"],"PHARMA": ["SUNPHARMA","CIPLA","DRREDDY","DIVISLAB","TORNTPHARM","ZYDUSLIFE","LUPIN","MANKIND","ALKEM","AUROPHARMA","MAXHEALTH"],"AUTO": ["MARUTI","M&M","BAJAJ-AUTO","EICHERMOT","TVSMOTOR","HEROMOTOCO","ASHOKLEY","MOTHERSON","BOSCHLTD"],"METAL": ["TATASTEEL","HINDALCO","JSWSTEEL","VEDL","JSL","NMDC","SAIL","APLAPOLLO","HINDZINC"],"ENERGY": ["ONGC","NTPC","POWERGRID","IOC","BPCL","GAIL","ADANIGREEN","ADANIENT","ADANIPORTS","ADANIPOWER","RELIANCE"],"FMCG": ["HINDUNILVR","NESTLEIND","VBL","BRITANNIA","TATACONSUM","DABUR","GODREJCP","MARICO","COLPAL","ITC"],"OTHERS": ["BSE","DIXON","POLYCAB","COCHINSHIP","MAZDOCK","INDHOTEL","VOLTAS","SUPREMEIND","LT","BHARTIARTL"]}
@@ -20,7 +58,7 @@ def login():
     obj=SmartConnect(api_key=API_KEY); obj.generateSession(CLIENT_ID,PIN,pyotp.TOTP(TOTP_SECRET).now()); print("✅ Login Success"); return obj
 
 def get_dates():
-    ist=timezone('Asia/Kolkata'); y=datetime.now(ist)-timedelta(days=1)
+    y=datetime.now(IST)-timedelta(days=1)
     while y.weekday()>=5: y-=timedelta(days=1)
     f=y-timedelta(days=35); return f.strftime("%Y-%m-%d 09:15"), y.strftime("%Y-%m-%d 15:30"), y.strftime("%Y-%m-%d")
 
@@ -98,10 +136,10 @@ def build_main_rows():
         for it in sorted(nifty_data.values(), key=lambda x: chg(x), reverse=True):
             if it['ltp']>it['p5_high']:
                 status="🚀 BREAKOUT"
-                if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
             elif it['ltp']<it['p5_low']:
                 status="🔻 BREAKDOWN"
-                if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
             else: status="RANGE BOUND"; it['break_time']=""
             rows.append([it['index'], it['symbol'], it['y_high'], it['y_low'], it['p5_high'], it['p5_low'], it['ltp'], f"{chg(it):+.2f}%", status, it['break_time'], it['m_high'], it['m_low']])
         rows.append(["","","","","","","","","","","",""])
@@ -113,38 +151,32 @@ def build_main_rows():
             for it in sec_stocks:
                 if it['ltp']>it['p5_high']:
                     status="🚀 BREAKOUT"
-                    if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                    if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
                 elif it['ltp']<it['p5_low']:
                     status="🔻 BREAKDOWN"
-                    if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                    if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
                 else: status="RANGE BOUND"; it['break_time']=""
                 rows.append([it['index'], it['symbol'], it['y_high'], it['y_low'], it['p5_high'], it['p5_low'], it['ltp'], f"{chg(it):+.2f}%", status, it['break_time'], it['m_high'], it['m_low']])
             rows.append(["","","","","","","","","","","",""])
     return rows
 
 def build_action_rows():
-    # Fakt BREAKOUT/BREAKDOWN, varati BREAKOUT latest, khali BREAKDOWN latest
     with data_lock:
         breakout_list=[]
         breakdown_list=[]
         all_items = list(nifty_data.values()) + list(instrument_data.values())
         for it in all_items:
             if it['ltp']>it['p5_high']:
-                status="🚀 BREAKOUT"
-                if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
                 breakout_list.append(it)
             elif it['ltp']<it['p5_low']:
-                status="🔻 BREAKDOWN"
-                if it['break_time']=="": it['break_time']=datetime.now().strftime("%H:%M:%S")
+                if it['break_time']=="": it['break_time']=datetime.now(IST).strftime("%H:%M:%S")
                 breakdown_list.append(it)
-
-        # Latest break_time varati yeil
         def sort_key(x):
             try: return datetime.strptime(x['break_time'], "%H:%M:%S")
             except: return datetime.min
         breakout_list.sort(key=sort_key, reverse=True)
         breakdown_list.sort(key=sort_key, reverse=True)
-
         rows=[]
         rows.append(["--- 🚀 BREAKOUT (Latest Varati) ---","","","","","","","","","","",""])
         for it in breakout_list:
@@ -188,32 +220,31 @@ def apply_colour_formatting(sheet):
         print(f"✅ Colour Applied to {sheet.title}")
     except Exception as e: print(f"Colour Error {sheet.title}:", e)
 
+print("=== KAVYADARSH V40 - IST FIX - 24x7 ===")
 obj=login(); fetch_all(obj); start_ws(obj)
 scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds=ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
 gc=gspread.authorize(creds)
 spreadsheet = gc.open(SPREADSHEET_NAME)
 sheet1 = spreadsheet.sheet1
-
 try:
     sheet2 = spreadsheet.worksheet("ACTION_LIVE")
 except:
     sheet2 = spreadsheet.add_worksheet(title="ACTION_LIVE", rows=1000, cols=20)
 
-header_main = [["KAVYADARSH FINAL - "+datetime.now().strftime("%d-%b %H:%M")],["FROM",get_dates()[0],"TO",get_dates()[1]],["INDEX","Symbol","PD High","PD Low","PW High (P5)","PW Low (P5)","LTP","CHANGE %","STATUS (Weekly)","BREAK TIME","1M High","1M Low"]]
-header_action = [["ACTION LIVE - BREAKOUT VARATI / BREAKDOWN KHALI - "+datetime.now().strftime("%d-%b %H:%M")],["FROM",get_dates()[0],"TO",get_dates()[1]],["INDEX","Symbol","PD High","PD Low","PW High (P5)","PW Low (P5)","LTP","CHANGE %","STATUS","BREAK TIME","1M High","1M Low"]]
+header_main = [["KAVYADARSH FINAL - "+datetime.now(IST).strftime("%d-%b %H:%M IST")],["FROM",get_dates()[0],"TO",get_dates()[1]],["INDEX","Symbol","PD High","PD Low","PW High (P5)","PW Low (P5)","LTP","CHANGE %","STATUS (Weekly)","BREAK TIME","1M High","1M Low"]]
+header_action = [["ACTION LIVE - BREAKOUT VARATI / BREAKDOWN KHALI - "+datetime.now(IST).strftime("%d-%b %H:%M IST")],["FROM",get_dates()[0],"TO",get_dates()[1]],["INDEX","Symbol","PD High","PD Low","PW High (P5)","PW Low (P5)","LTP","CHANGE %","STATUS","BREAK TIME","1M High","1M Low"]]
 
 sheet1.clear(); sheet1.update(values=header_main+build_main_rows(), range_name="A1")
 apply_colour_formatting(sheet1)
-
 sheet2.clear(); sheet2.update(values=header_action+build_action_rows(), range_name="A1")
 apply_colour_formatting(sheet2)
 
-print("\n▶ LIVE STARTED - SHEET1: MAIN | SHEET2: ACTION_LIVE (Breakout varati, Breakdown khali, Latest Time)\n")
+print("\n▶ LIVE STARTED - SHEET1: MAIN | SHEET2: ACTION_LIVE (Breakout varati, Breakdown khali, Latest Time) - IST TIME\n")
 while True:
     try:
         sheet1.update(values=build_main_rows(), range_name="A4")
         sheet2.update(values=build_action_rows(), range_name="A4")
-        print(f"🔄 {datetime.now().strftime('%H:%M:%S')} Updated | MAIN:{len(build_main_rows())} ACTION:{len(build_action_rows())}")
+        print(f"🔄 {datetime.now(IST).strftime('%H:%M:%S IST')} Updated | MAIN:{len(build_main_rows())} ACTION:{len(build_action_rows())}")
         time.sleep(5)
     except Exception as e: print(e); time.sleep(5)
