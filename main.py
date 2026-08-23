@@ -84,26 +84,40 @@ def get_gspread_client_main():
     raise Exception("service_account.json missing")
 
 def get_token_automatic():
-    tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
-    if tok and len(tok) > 50:
-        return tok
+    # Quick check - no heavy calls for /upstox-login speed
+    def token_ok(t):
+        return t and len(t) > 100 and "eyJ" in str(t)
+    
+    # 1. FILE
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE,"r") as f: 
                 tok=f.read().strip()
-            if tok and len(tok) > 50:
-                os.environ["UPSTOX_ACCESS_TOKEN"]=tok
-                return tok
+            if token_ok(tok):
+                if is_token_valid(tok):
+                    os.environ["UPSTOX_ACCESS_TOKEN"]=tok
+                    return tok
         except: pass
+    
+    # 2. ENV - check validity
+    tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
+    if token_ok(tok):
+        if is_token_valid(tok):
+            return tok
+        else:
+            # Clear expired ENV
+            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+    
+    # 3. SHEET B1
     try:
         gc = get_gspread_client_main()
         sh = gc.open("Dsheet")
         try:
-            b1 = sh.sheet1.cell(1,2).value
-            if b1 and "eyJ" in str(b1) and len(str(b1))>100:
-                with open(TOKEN_FILE,"w") as f: f.write(str(b1).strip())
-                os.environ["UPSTOX_ACCESS_TOKEN"]=str(b1).strip()
-                return str(b1).strip()
+            b1 = str(sh.sheet1.cell(1,2).value or "").strip()
+            if token_ok(b1) and is_token_valid(b1):
+                with open(TOKEN_FILE,"w") as f: f.write(b1)
+                os.environ["UPSTOX_ACCESS_TOKEN"]=b1
+                return b1
         except Exception as e:
             print(f"B1 fetch error main: {e}")
     except Exception as e:
