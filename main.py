@@ -359,33 +359,36 @@ def upstox_callback():
         else: return f"Error: {token_data}"
     except Exception as e: return f"Error: {e}"
 
-print("=== STARTING 24x7 AUTOMATIC TOKEN MODE - MAGACHYA SHEET SARKHA ===")
+print("=== STARTING 24x7 AUTOMATIC TOKEN MODE - MAGACHYA SHEET SARKHA - FAST PORT BIND FIX ===")
 check_files()
 
-# --- FIX: Start threads DIRECTLY - no nested thread wrapper ---
-# Nested threading.Thread inside thread was not starting in gunicorn sync worker
-print("🚀 Starting background threads directly (no delay wrapper)...")
-try:
-    threading.Thread(target=run_kavyadarsh,daemon=True).start()
-    print("✅ KavyaDarsh thread started")
-except Exception as e:
-    print(f"❌ KavyaDarsh thread failed: {e}")
+# --- CRITICAL FIX: Delay heavy threads by 10 sec so /upstox-login port binds FAST ---
+# Magashi mast chalat hota pan redeploy nantar login page open hot nahi - karan KavyaDarsh.py import heavy aahe
+# Tya mule gunicorn worker boot slow - Render thinks port not open
+def delayed_start():
+    print("⏳ Waiting 10 sec for Flask port bind - then starting background algos...")
+    time.sleep(10)
+    try:
+        threading.Thread(target=run_kavyadarsh,daemon=True).start()
+        print("✅ KavyaDarsh thread started (delayed)")
+    except Exception as e:
+        print(f"❌ KavyaDarsh thread failed: {e}")
+    try:
+        threading.Thread(target=run_upstox,daemon=True).start()
+        print("✅ Upstock4 thread started (delayed)")
+    except Exception as e:
+        print(f"❌ Upstock4 thread failed: {e}")
+    try:
+        threading.Thread(target=send_telegram,daemon=True).start()
+        threading.Thread(target=keep_alive,daemon=True).start()
+        threading.Thread(target=auto_token_watcher,daemon=True).start()
+        print("✅ Helper threads started (delayed)")
+    except Exception as e:
+        print(f"❌ Helper threads failed: {e}")
 
-try:
-    threading.Thread(target=run_upstox,daemon=True).start()
-    print("✅ Upstock4 thread started")
-except Exception as e:
-    print(f"❌ Upstock4 thread failed: {e}")
-
-try:
-    threading.Thread(target=send_telegram,daemon=True).start()
-    threading.Thread(target=keep_alive,daemon=True).start()
-    threading.Thread(target=auto_token_watcher,daemon=True).start()
-    print("✅ Helper threads started (Telegram, keep_alive, token watcher)")
-except Exception as e:
-    print(f"❌ Helper threads failed: {e}")
-
-print("✅ All background threads launched - check /logs for Running: True")
+# Start delayed starter in background - Flask binds port IMMEDIATELY
+threading.Thread(target=delayed_start,daemon=True).start()
+print("✅ Fast port bind - Flask ready instantly! Background algos start in 10 sec - /upstox-login ready!")
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
