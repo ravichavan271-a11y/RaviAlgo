@@ -77,52 +77,76 @@ def get_gspread_client():
     raise Exception("service_account.json missing - add FILE or ENV GOOGLE_SERVICE_ACCOUNT_JSON")
 
 def get_automatic_token():
-    # 1. ENV
-    tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
-    if tok and len(tok) > 50:
-        print(f"✅ Token from ENV: {tok[:15]}...")
-        return tok
-    # 2. FILE
+    # Helper to check if token looks valid (will be fully validated later)
+    def token_looks_ok(t):
+        return t and len(t) > 100 and "eyJ" in str(t)
+    
+    # 1. FILE - most recent local
     if os.path.exists("upstox_token.txt"):
         try:
             with open("upstox_token.txt","r") as f:
                 tok = f.read().strip()
-            if tok and len(tok) > 50:
+            if token_looks_ok(tok):
                 print(f"✅ Token from FILE: {tok[:15]}...")
-                os.environ["UPSTOX_ACCESS_TOKEN"] = tok
-                return tok
+                # Quick validity check
+                if is_token_valid(tok):
+                    os.environ["UPSTOX_ACCESS_TOKEN"] = tok
+                    return tok
+                else:
+                    print(f"⚠️ FILE token expired - trying other sources")
+                    try: os.remove("upstox_token.txt")
+                    except: pass
         except Exception as e:
             print(f"File token error: {e}")
-    # 3. SHEET B1 + TOKEN sheet
+    
+    # 2. SHEET B1 - auto updated daily
     try:
         gc_temp = get_gspread_client()
         sh = gc_temp.open(SPREADSHEET_NAME)
         try:
             sheet1 = sh.sheet1
-            b1_token = sheet1.cell(1,2).value
-            if b1_token and len(str(b1_token)) > 50 and "eyJ" in str(b1_token):
-                print(f"✅ Token from SHEET B1: {str(b1_token)[:15]}...")
-                with open("upstox_token.txt","w") as f:
-                    f.write(str(b1_token).strip())
-                os.environ["UPSTOX_ACCESS_TOKEN"] = str(b1_token).strip()
-                return str(b1_token).strip()
+            b1_token = str(sheet1.cell(1,2).value or "").strip()
+            if token_looks_ok(b1_token):
+                print(f"✅ Token from SHEET B1: {b1_token[:15]}...")
+                if is_token_valid(b1_token):
+                    with open("upstox_token.txt","w") as f:
+                        f.write(b1_token)
+                    os.environ["UPSTOX_ACCESS_TOKEN"] = b1_token
+                    return b1_token
+                else:
+                    print(f"⚠️ SHEET B1 token expired")
         except Exception as e:
             print(f"B1 token fetch error: {e}")
         try:
             token_sheet = sh.worksheet("TOKEN")
-            sheet_token = token_sheet.cell(1,1).value or token_sheet.cell(1,2).value
-            if sheet_token and len(str(sheet_token)) > 50 and "eyJ" in str(sheet_token):
-                print(f"✅ Token from TOKEN sheet: {str(sheet_token)[:15]}...")
-                with open("upstox_token.txt","w") as f:
-                    f.write(str(sheet_token).strip())
-                os.environ["UPSTOX_ACCESS_TOKEN"] = str(sheet_token).strip()
-                return str(sheet_token).strip()
+            sheet_token = str(token_sheet.cell(1,1).value or token_sheet.cell(1,2).value or "").strip()
+            if token_looks_ok(sheet_token):
+                print(f"✅ Token from TOKEN sheet: {sheet_token[:15]}...")
+                if is_token_valid(sheet_token):
+                    with open("upstox_token.txt","w") as f:
+                        f.write(sheet_token)
+                    os.environ["UPSTOX_ACCESS_TOKEN"] = sheet_token
+                    return sheet_token
+                else:
+                    print(f"⚠️ TOKEN sheet token expired")
         except Exception as e:
             print(f"TOKEN sheet fetch error: {e}")
     except Exception as e:
         print(f"Sheet token fetch error: {e}")
+    
+    # 3. ENV - last resort (often stale)
+    tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
+    if token_looks_ok(tok):
+        print(f"✅ Token from ENV: {tok[:15]}... checking validity")
+        if is_token_valid(tok):
+            return tok
+        else:
+            print(f"❌ ENV Token INVALID 401 - clearing ENV, will need new login")
+            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
+            os.environ.pop("UPSTOX_TOKEN", None)
+    
     # NO FALLBACK - return empty, wait for valid token
-    print("⚠️ No token found - will wait for /upstox-login")
+    print("⚠️ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
     return ""
 
 def is_token_valid(token):
