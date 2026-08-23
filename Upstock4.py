@@ -1,5 +1,6 @@
 import gzip, io, time, threading, os, re, sys
 from datetime import datetime, timedelta
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
@@ -7,7 +8,9 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V27 - AUTOMATIC TOKEN - SHEET + FILE + ENV - 24x7 MODE")
+IST = pytz.timezone('Asia/Kolkata')
+
+print("FINAL V27 - AUTOMATIC TOKEN - SHEET + FILE + ENV - 24x7 MODE - IST FIX")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -175,7 +178,7 @@ def wait_for_valid_token():
             print(f"✅ Valid token ready: {tok[:15]}...")
             return tok
         print("⏳ No valid token - waiting 60 sec for /upstox-login... (Telegram alert sent)")
-        send_telegram_alert(f"⚠️ <b>Upstox Token Missing/Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now().strftime('%H:%M:%S')}")
+        send_telegram_alert(f"⚠️ <b>Upstox Token Missing/Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
         time.sleep(60)
 
 UPSTOX_ACCESS_TOKEN = get_automatic_token()
@@ -207,7 +210,7 @@ def connect_sheets():
     retry = 0
     while True:
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to Google Sheets... attempt {retry+1}")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Connecting to Google Sheets... attempt {retry+1}")
             gc = get_gspread_client()
             sh = gc.open(SPREADSHEET_NAME)
             sheet = sh.sheet1
@@ -332,7 +335,7 @@ with ThreadPoolExecutor(max_workers=10) as ex:
 
 pd_day=None
 for i in range(1,8):
-    d=(datetime.now()-timedelta(days=i)).strftime("%Y-%m-%d")
+    d=(datetime.now(IST)-timedelta(days=i)).strftime("%Y-%m-%d")
     if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
 print(f"PD Day: {pd_day}")
 with ThreadPoolExecutor(max_workers=10) as ex:
@@ -358,7 +361,7 @@ def fetch_ltp(keys):
 
 print("Fetching LTP...")
 for i in range(0, len(all_keys), 20): fetch_ltp(all_keys[i:i+20])
-today = datetime.now().strftime("%Y-%m-%d")
+today = datetime.now(IST).strftime("%Y-%m-%d")
 remaining = [k for k,v in instrument_data.items() if v["ltp"]==0]
 if remaining:
     print(f"Fetching remaining {len(remaining)} from candle...")
@@ -385,8 +388,8 @@ def build_sorted():
     for it in indices:
         dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
         status=get_status(it)
-        if status and not it["break_time"]: it["break_time"]=datetime.now().strftime("%H:%M:%S")
-        rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now().strftime("%H:%M:%S")])
+        if status and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
+        rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
         row_map[it["symbol"]]=rnum; rnum+=1
     rows.append([]); rnum+=1
     for sec_name in STRUCTURE.keys():
@@ -396,8 +399,8 @@ def build_sorted():
         for it in stocks:
             dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
             status=get_status(it)
-            if status and not it["break_time"]: it["break_time"]=datetime.now().strftime("%H:%M:%S")
-            rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now().strftime("%H:%M:%S")])
+            if status and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
+            rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
             row_map[it["symbol"]]=rnum; rnum+=1
         rows.append([]); rnum+=1
     return rows
@@ -416,7 +419,7 @@ def build_breakout_sheet():
             has_data=True
             dist= index_it["ltp"]/index_it["wh"]*100 if index_it["wh"]>0 else 0
             volx= index_it["vol"]/index_it["prev_vol"] if index_it["prev_vol"]>0 else 0
-            rows.append([index_it["symbol"],index_it["pdh"],index_it["pdl"],index_it["wh"],index_it["wl"],index_it["ltp"],f"{index_it['change']:.2f}%",index_it["vol"],index_it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",index_status,index_it["break_time"],datetime.now().strftime("%H:%M:%S"),"INDEX"])
+            rows.append([index_it["symbol"],index_it["pdh"],index_it["pdl"],index_it["wh"],index_it["wl"],index_it["ltp"],f"{index_it['change']:.2f}%",index_it["vol"],index_it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",index_status,index_it["break_time"],datetime.now(IST).strftime("%H:%M:%S"),"INDEX"])
             rows.append([f"--- {sec_name} MADHLE {index_status} STOCKS ---"])
             stock_list=[]
             for sym in STRUCTURE[sec_name]:
@@ -430,7 +433,7 @@ def build_breakout_sheet():
             if stock_list:
                 for it in stock_list:
                     dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
-                    rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",get_status(it),it["break_time"],datetime.now().strftime("%H:%M:%S"),sec_name])
+                    rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",get_status(it),it["break_time"],datetime.now(IST).strftime("%H:%M:%S"),sec_name])
             else:
                 rows.append([f"INDEX {index_status} AAHE PAN STOCK EK PANI NAHI"])
             rows.append([])
@@ -492,7 +495,7 @@ safe_sheet_update()
 def start_streamer_with_reconnect():
     while True:
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Upstox Streamer...")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer...")
             # Refresh token each time
             global UPSTOX_ACCESS_TOKEN
             UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
@@ -541,7 +544,7 @@ def start_streamer_with_reconnect():
                                 pending_updates[ikey]=float(ltp)
                                 new_status=get_status(instrument_data[ikey])
                                 if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
-                                    instrument_data[ikey]["break_time"]=datetime.now().strftime("%H:%M:%S")
+                                    instrument_data[ikey]["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
                                 if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
                                     sym = instrument_data[ikey]["symbol"]
                                     last_alert = alerted_symbols.get(sym)
@@ -609,7 +612,7 @@ def start_streamer_with_reconnect():
                                         dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
                                         volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
                                         status=get_status(it)
-                                        batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now().strftime("%H:%M:%S")]]})
+                                        batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now(IST).strftime("%H:%M:%S")]]})
                                 if batch:
                                     try:
                                         sheet.batch_update(batch)
