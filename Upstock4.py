@@ -10,7 +10,7 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V31 - SMOOTH NO BLINK - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
+print("FINAL V32 - B1 TOKEN ONLY + B2 B3 DATE + SMOOTH - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
 
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
@@ -99,6 +99,7 @@ def get_gspread_client():
 def get_automatic_token():
     def token_looks_ok(t):
         return t and len(t) > 100 and "eyJ" in str(t)
+    # 1. FILE - local backup
     if os.path.exists("upstox_token.txt"):
         try:
             with open("upstox_token.txt","r") as f:
@@ -114,6 +115,7 @@ def get_automatic_token():
                     except: pass
         except Exception as e:
             print(f"File token error: {e}")
+    # 2. SHEET B1 ONLY - as per requirement - token fakt B1 madhe
     try:
         gc_temp = get_gspread_client()
         sh = gc_temp.open(SPREADSHEET_NAME)
@@ -131,22 +133,9 @@ def get_automatic_token():
                     print(f"⚠ SHEET B1 token expired")
         except Exception as e:
             print(f"B1 token fetch error: {e}")
-        try:
-            token_sheet = sh.worksheet("TOKEN")
-            sheet_token = str(token_sheet.cell(1,1).value or token_sheet.cell(1,2).value or "").strip()
-            if token_looks_ok(sheet_token):
-                print(f"✅ Token from TOKEN sheet: {sheet_token[:15]}...")
-                if is_token_valid(sheet_token):
-                    with open("upstox_token.txt","w") as f:
-                        f.write(sheet_token)
-                    os.environ["UPSTOX_ACCESS_TOKEN"] = sheet_token
-                    return sheet_token
-                else:
-                    print(f"⚠ TOKEN sheet token expired")
-        except Exception as e:
-            print(f"TOKEN sheet fetch error: {e}")
     except Exception as e:
         print(f"Sheet token fetch error: {e}")
+    # 3. ENV - last resort
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
     if token_looks_ok(tok):
         print(f"✅ Token from ENV: {tok[:15]}... checking validity")
@@ -157,7 +146,7 @@ def get_automatic_token():
             os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
             os.environ.pop("UPSTOX_TOKEN", None)
     print("⚠ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
-    return ""
+    return 
 
 def is_token_valid(token):
     if not token or len(token) < 50:
