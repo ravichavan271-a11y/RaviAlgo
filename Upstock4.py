@@ -10,7 +10,7 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V30 - FIXED STRUCTURE MIX - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
+print("FINAL V31 - SMOOTH NO BLINK - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
 
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
@@ -490,9 +490,6 @@ def safe_sheet_update():
     for attempt in range(3):
         try:
             full = build_sorted()
-            try:
-                sheet.clear()
-            except: pass
             sheet.update(values=full, range_name="A4")
             breakout_data = build_breakout_sheet()
             breakout_sheet.clear()
@@ -591,8 +588,8 @@ def start_streamer_with_reconnect():
                                 except: pass
                     except: pass
             def on_open():
-                print("✅ LIVE CONNECTED - V29 WITH TELEGRAM - HINDZINC + HINDCOPPER Added")
-                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V29 - Metal + HINDZINC + HINDCOPPER</b>\nMarket screener chalu!")
+                print("✅ LIVE CONNECTED - V31 SMOOTH NO BLINK - HINDZINC + HINDCOPPER")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V31 SMOOTH - Metal + HINDZINC + HINDCOPPER</b>\nMarket screener chalu!")
             streamer.on("open", on_open)
             streamer.on("message", on_message)
             streamer.connect()
@@ -613,11 +610,7 @@ def start_streamer_with_reconnect():
                                 full_sorted=build_sorted()
                                 breakout_sorted=build_breakout_sheet()
                                 try:
-                                    try:
-                                        sheet.clear()
-                                    except: pass
                                     sheet.update(values=full_sorted, range_name="A4")
-                                    breakout_sheet.clear()
                                     breakout_sheet.update(values=breakout_sorted, range_name="A1")
                                 except Exception as e: 
                                     print(f"Sort err {e} - reconnecting sheets")
@@ -638,7 +631,6 @@ def start_streamer_with_reconnect():
                                     try:
                                         sheet.batch_update(batch)
                                         breakout_sorted=build_breakout_sheet()
-                                        breakout_sheet.clear()
                                         breakout_sheet.update(values=breakout_sorted, range_name="A1")
                                     except Exception as e:
                                         print(f"Batch update err {e} - reconnecting")
