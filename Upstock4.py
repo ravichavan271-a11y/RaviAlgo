@@ -10,7 +10,7 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V28 - MARKET HOURS 9:00 to 15:30 IST - AUTOMATIC TOKEN - IST FIX")
+print("FINAL V29 - METAL + HINDZINC + HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
 
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
@@ -46,7 +46,6 @@ def send_telegram_alert(message):
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            # Show full message in log - not truncated 80 chars
             print(f"TELEGRAM: {message}")
         else:
             print(f"Telegram Error: {resp.text}")
@@ -57,9 +56,7 @@ SPREADSHEET_NAME = "Dsheet"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 
 def get_gspread_client():
-    """Get gspread client from FILE, SECRET FILE, or ENV GOOGLE_SERVICE_ACCOUNT_JSON"""
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    # 1. Try multiple file paths - including Render Secret Files
     possible_paths = [
         SERVICE_ACCOUNT_FILE,
         "./service_account.json",
@@ -75,7 +72,6 @@ def get_gspread_client():
                 return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(path, scope))
             except Exception as e:
                 print(f"❌ File auth failed at {path}: {e}")
-    # 2. Try ENV JSON
     env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("GOOGLE_CREDENTIALS", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
     if env_json:
         try:
@@ -85,7 +81,6 @@ def get_gspread_client():
             return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
         except Exception as e:
             print(f"❌ ENV auth failed: {e} - length {len(env_json)}")
-            # Try writing ENV to file and use it
             try:
                 with open(SERVICE_ACCOUNT_FILE, "w") as f:
                     f.write(env_json)
@@ -94,7 +89,6 @@ def get_gspread_client():
             except Exception as e2:
                 print(f"❌ ENV to file auth also failed: {e2}")
     print(f"❌ NO service_account found! Checked paths {possible_paths} and ENV GOOGLE_SERVICE_ACCOUNT_JSON")
-    # List files for debug
     try:
         print(f"📁 Current dir files: {os.listdir('.')[:20]}")
         if os.path.exists("/etc/secrets"):
@@ -103,29 +97,23 @@ def get_gspread_client():
     raise Exception("service_account.json missing - add FILE or ENV GOOGLE_SERVICE_ACCOUNT_JSON")
 
 def get_automatic_token():
-    # Helper to check if token looks valid (will be fully validated later)
     def token_looks_ok(t):
         return t and len(t) > 100 and "eyJ" in str(t)
-    
-    # 1. FILE - most recent local
     if os.path.exists("upstox_token.txt"):
         try:
             with open("upstox_token.txt","r") as f:
                 tok = f.read().strip()
             if token_looks_ok(tok):
                 print(f"✅ Token from FILE: {tok[:15]}...")
-                # Quick validity check
                 if is_token_valid(tok):
                     os.environ["UPSTOX_ACCESS_TOKEN"] = tok
                     return tok
                 else:
-                    print(f"⚠️ FILE token expired - trying other sources")
+                    print(f"⚠ FILE token expired - trying other sources")
                     try: os.remove("upstox_token.txt")
                     except: pass
         except Exception as e:
             print(f"File token error: {e}")
-    
-    # 2. SHEET B1 - auto updated daily
     try:
         gc_temp = get_gspread_client()
         sh = gc_temp.open(SPREADSHEET_NAME)
@@ -140,7 +128,7 @@ def get_automatic_token():
                     os.environ["UPSTOX_ACCESS_TOKEN"] = b1_token
                     return b1_token
                 else:
-                    print(f"⚠️ SHEET B1 token expired")
+                    print(f"⚠ SHEET B1 token expired")
         except Exception as e:
             print(f"B1 token fetch error: {e}")
         try:
@@ -154,13 +142,11 @@ def get_automatic_token():
                     os.environ["UPSTOX_ACCESS_TOKEN"] = sheet_token
                     return sheet_token
                 else:
-                    print(f"⚠️ TOKEN sheet token expired")
+                    print(f"⚠ TOKEN sheet token expired")
         except Exception as e:
             print(f"TOKEN sheet fetch error: {e}")
     except Exception as e:
         print(f"Sheet token fetch error: {e}")
-    
-    # 3. ENV - last resort (often stale)
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
     if token_looks_ok(tok):
         print(f"✅ Token from ENV: {tok[:15]}... checking validity")
@@ -170,9 +156,7 @@ def get_automatic_token():
             print(f"❌ ENV Token INVALID 401 - clearing ENV, will need new login")
             os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
             os.environ.pop("UPSTOX_TOKEN", None)
-    
-    # NO FALLBACK - return empty, wait for valid token
-    print("⚠️ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
+    print("⚠ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
     return ""
 
 def is_token_valid(token):
@@ -201,12 +185,12 @@ def wait_for_valid_token():
             print(f"✅ Valid token ready: {tok[:15]}...")
             return tok
         print("⏳ No valid token - waiting 60 sec for /upstox-login... (Telegram alert sent)")
-        send_telegram_alert(f"⚠️ <b>Upstox Token Missing/Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
+        send_telegram_alert(f"⚠ <b>Upstox Token Missing/Expired!</b>\n\nLogin kara:\nhttps://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
         time.sleep(60)
 
 UPSTOX_ACCESS_TOKEN = get_automatic_token()
 if not UPSTOX_ACCESS_TOKEN or not is_token_valid(UPSTOX_ACCESS_TOKEN):
-    print("⚠️ No valid token at startup - entering wait loop...")
+    print("⚠ No valid token at startup - entering wait loop...")
     UPSTOX_ACCESS_TOKEN = wait_for_valid_token()
 
 alerted_symbols = {}
@@ -220,7 +204,6 @@ def parse_date(val):
         except: pass
     return s[:10]
 
-# --- 24x7 GOOGLE SHEET CONNECT WITH RETRY - NO EXIT ---
 gc = None
 sh = None
 sheet = None
@@ -250,7 +233,7 @@ def connect_sheets():
             print(f"❌ GOOGLE SHEET ERROR (attempt {retry}): {e} - Retrying in 30 sec... (NO EXIT - 24x7)")
             time.sleep(30)
             if retry % 10 == 0:
-                send_telegram_alert(f"⚠️ Google Sheet connect fail {retry} times: {str(e)[:100]}")
+                send_telegram_alert(f"⚠ Google Sheet connect fail {retry} times: {str(e)[:100]}")
 
 connect_sheets()
 
@@ -262,7 +245,7 @@ STRUCTURE = {
     "NIFTY IT": ["INFY","TCS","HCLTECH","WIPRO","TECHM","LTIM","PERSISTENT","OFSS","COFORGE"],
     "NIFTY AUTO": ["MARUTI","TATAMOTORS","M&M","BAJAJ-AUTO","EICHERMOT","TIINDIA","HEROMOTOCO"],
     "NIFTY DEFENCE": ["HAL","BEL","GRSE","COCHINSHIP","MAZDOCK","BDL","DATAPATTNS"],
-    "NIFTY METAL": ["JSWSTEEL","HINDALCO","VEDL","JINDALSTEL","NATIONALUM","TITAN"],
+    "NIFTY METAL": ["JSWSTEEL","HINDALCO","VEDL","JINDALSTEL","NATIONALUM","TITAN","HINDZINC","HINDCOPPER"],
     "NIFTY FMCG": ["HINDUNILVR","NESTLEIND","BRITANNIA","TATACONSUM","VBL","GODREJCP","COLPAL"],
     "NIFTY ENERGY": ["POWERGRID","COALINDIA","CGPOWER","ADANIGREEN","JSWENERGY"],
     "NIFTY PHARMA": ["DRREDDY","TORNTPHARM","LUPIN","SUNPHARMA","CIPLA","DIVISLAB","GLENMARK","ZYDU","LAURUSLABS"],
@@ -306,6 +289,9 @@ mp["CDSL"]="NSE_EQ|INE736A01011"; mp["ADANIGREEN"]="NSE_EQ|INE364U01010"
 mp["JSWENERGY"]="NSE_EQ|INE121E01018"; mp["SHRIRAMFIN"]="NSE_EQ|INE721A01047"
 mp["M&M"]="NSE_EQ|INE101A01026"; mp["BOSCHLTD"]="NSE_EQ|INE323A01026"
 mp["SOLARINDS"]="NSE_EQ|INE343H01029"; mp["MARUTI"]="NSE_EQ|INE585B01010"
+# Explicit mapping for new metal stocks (fallback if CSV miss)
+mp["HINDZINC"]="NSE_EQ|INE267A01025"
+mp["HINDCOPPER"]="NSE_EQ|INE531E01026"
 
 mcx_found = False
 for _, row in df.iterrows():
@@ -333,7 +319,7 @@ for sec, stocks in STRUCTURE.items():
             instrument_data[k]={"symbol":sym,"pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"vol":0,"prev_vol":0,"is_index":False,"change":0,"break_time":""}
             all_keys.append(k)
 
-print(f"Total Instruments: {len(all_keys)}")
+print(f"Total Instruments: {len(all_keys)} - Includes HINDZINC, HINDCOPPER")
 
 def get_candle(k, fro, to):
     ek=urllib.parse.quote(k, safe=''); url=f"https://api.upstox.com/v3/historical-candle/{ek}/days/1/{to}/{fro}"
@@ -491,7 +477,6 @@ def setup_permanent_colors():
     except Exception as e:
         print(f"Color rule err {e}")
 
-# Safe sheet update with retry
 def safe_sheet_update():
     for attempt in range(3):
         try:
@@ -501,12 +486,11 @@ def safe_sheet_update():
             breakout_sheet.clear()
             breakout_sheet.update(values=breakout_data, range_name="A1")
             setup_permanent_colors()
-            print(f"DONE {len(row_map)} rows")
+            print(f"DONE {len(row_map)} rows - Includes HINDZINC, HINDCOPPER")
             return True
         except Exception as e:
             print(f"Sheet update fail {attempt+1}: {e} - retry 10 sec")
             time.sleep(10)
-            # Try reconnect sheets
             try:
                 connect_sheets()
             except: pass
@@ -514,17 +498,14 @@ def safe_sheet_update():
 
 safe_sheet_update()
 
-# --- STREAMER WITH AUTO RECONNECT - MARKET HOURS 9:00 to 15:30 ONLY ---
 def start_streamer_with_reconnect():
     while True:
-        # --- MARKET HOURS CHECK ---
         if not is_market_open():
             print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - Upstock4 Streamer Sleep 60 sec...")
             time.sleep(60)
             continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer - MARKET HOURS 9:00-15:30...")
-            # Refresh token each time
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer - MARKET HOURS 9:00-15:30... V29 Metal 8 stocks")
             global UPSTOX_ACCESS_TOKEN
             UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
             if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
@@ -532,20 +513,16 @@ def start_streamer_with_reconnect():
                     with open("upstox_token.txt","r") as f:
                         UPSTOX_ACCESS_TOKEN = f.read().strip()
                 except: pass
-            
             if not UPSTOX_ACCESS_TOKEN:
                 print("❌ No token - waiting 60 sec...")
                 time.sleep(60)
                 continue
-            
             configuration = upstox_client.Configuration()
             configuration.access_token = UPSTOX_ACCESS_TOKEN
             api_client = upstox_client.ApiClient(configuration)
             streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
-
             pending_updates={}; lock=threading.Lock()
             last_sorted_keys=""
-
             def on_message(message):
                 feeds=message.get("feeds",{})
                 for ikey, feed in feeds.items():
@@ -569,7 +546,6 @@ def start_streamer_with_reconnect():
                             if ltp:
                                 prev_status = get_status(instrument_data[ikey])
                                 instrument_data[ikey]["ltp"]=float(ltp)
-                                # --- FIX: Calculate change immediately - not 0.00% bug ---
                                 if instrument_data[ikey]["prev_close"]>0:
                                     instrument_data[ikey]["change"]=(float(ltp)-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
                                 pending_updates[ikey]=float(ltp)
@@ -583,7 +559,6 @@ def start_streamer_with_reconnect():
                                         volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
                                         dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
                                         emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
-                                        # Full data for telegram - not truncated
                                         chg_val = instrument_data[ikey]['change']
                                         msg = (
                                             f"{emoji} <b>{new_status} ALERT - {sym}</b> {emoji}\n\n"
@@ -603,15 +578,12 @@ def start_streamer_with_reconnect():
                                         instrument_data[ikey]["vol"] = v_int
                                 except: pass
                     except: pass
-
             def on_open():
-                print("✅ LIVE CONNECTED - V24 24x7 WITH TELEGRAM")
-                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V24 24x7</b>\nMarket screener chalu - Breakout alerts active!")
-
+                print("✅ LIVE CONNECTED - V29 WITH TELEGRAM - HINDZINC + HINDCOPPER Added")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V29 - Metal + HINDZINC + HINDCOPPER</b>\nMarket screener chalu!")
             streamer.on("open", on_open)
             streamer.on("message", on_message)
             streamer.connect()
-
             def sheet_updater():
                 nonlocal last_sorted_keys
                 last_sort=time.time()
@@ -657,18 +629,13 @@ def start_streamer_with_reconnect():
                                         try: connect_sheets()
                                         except: pass
                         last_sort=time.time()
-
             threading.Thread(target=sheet_updater,daemon=True).start()
-            
-            # Keep this thread alive - streamer runs in its own thread
             while True:
                 time.sleep(10)
-                
         except Exception as e:
             import traceback
             print(f"❌ Streamer crashed: {e} - Reconnecting in 15 sec...\n{traceback.format_exc()[:500]}")
-            send_telegram_alert(f"⚠️ Streamer crash: {str(e)[:100]} - Reconnecting...")
+            send_telegram_alert(f"⚠ Streamer crash: {str(e)[:100]} - Reconnecting...")
             time.sleep(15)
 
-# Start 24x7 loop - never exit
 start_streamer_with_reconnect()
