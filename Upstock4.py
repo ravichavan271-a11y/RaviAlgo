@@ -10,7 +10,7 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V29 - METAL + HINDZINC + HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
+print("FINAL V30 - FIXED STRUCTURE MIX - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
 
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
@@ -390,6 +390,8 @@ for k,v in instrument_data.items():
 
 row_map={}
 def build_sorted():
+    global row_map
+    row_map.clear()
     rows=[]; rnum=5
     rows.append(["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","VOLUME","PREV VOL","VOL X","DIST%","STATUS","BREAK TIME","LIVE TIME"])
     indices=[it for it in instrument_data.values() if it.get("is_index")]
@@ -399,7 +401,11 @@ def build_sorted():
         status=get_status(it)
         if status and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
         rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
-        row_map[it["symbol"]]=rnum; rnum+=1
+        # row_map as list for duplicate symbols (e.g. MARUTI in AUTO and MOST LIQUID)
+        if it["symbol"] not in row_map:
+            row_map[it["symbol"]] = []
+        row_map[it["symbol"]].append(rnum)
+        rnum+=1
     rows.append([]); rnum+=1
     for sec_name in STRUCTURE.keys():
         rows.append([sec_name]); rnum+=1
@@ -410,7 +416,10 @@ def build_sorted():
             status=get_status(it)
             if status and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
             rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
-            row_map[it["symbol"]]=rnum; rnum+=1
+            if it["symbol"] not in row_map:
+                row_map[it["symbol"]] = []
+            row_map[it["symbol"]].append(rnum)
+            rnum+=1
         rows.append([]); rnum+=1
     return rows
 
@@ -481,6 +490,9 @@ def safe_sheet_update():
     for attempt in range(3):
         try:
             full = build_sorted()
+            try:
+                sheet.clear()
+            except: pass
             sheet.update(values=full, range_name="A4")
             breakout_data = build_breakout_sheet()
             breakout_sheet.clear()
@@ -601,6 +613,9 @@ def start_streamer_with_reconnect():
                                 full_sorted=build_sorted()
                                 breakout_sorted=build_breakout_sheet()
                                 try:
+                                    try:
+                                        sheet.clear()
+                                    except: pass
                                     sheet.update(values=full_sorted, range_name="A4")
                                     breakout_sheet.clear()
                                     breakout_sheet.update(values=breakout_sorted, range_name="A1")
@@ -613,11 +628,12 @@ def start_streamer_with_reconnect():
                                 for ikey, it in instrument_data.items():
                                     sym=it["symbol"]
                                     if sym in row_map:
-                                        rnum=row_map[sym]
-                                        dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
-                                        volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
-                                        status=get_status(it)
-                                        batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now(IST).strftime("%H:%M:%S")]]})
+                                        rnums = row_map[sym] if isinstance(row_map[sym], list) else [row_map[sym]]
+                                        for rnum in rnums:
+                                            dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
+                                            volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
+                                            status=get_status(it)
+                                            batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], datetime.now(IST).strftime("%H:%M:%S")]]})
                                 if batch:
                                     try:
                                         sheet.batch_update(batch)
