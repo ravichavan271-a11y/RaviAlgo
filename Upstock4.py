@@ -10,12 +10,12 @@ import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
 
-print("FINAL V32 - B1 TOKEN ONLY + B2 B3 DATE + SMOOTH - HINDZINC HINDCOPPER - MARKET HOURS 9:00 to 15:30 IST")
+print("FINAL V33 - B1 TOKEN ONLY + B2 B3 DATE + SMOOTH + PDH HOLIDAY FIX")
 
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
     now = datetime.now(IST)
-    if now.weekday() >= 5:  # Sat, Sun
+    if now.weekday() >= 5:
         return False
     market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
     market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -99,7 +99,6 @@ def get_gspread_client():
 def get_automatic_token():
     def token_looks_ok(t):
         return t and len(t) > 100 and "eyJ" in str(t)
-    # 1. FILE - local backup
     if os.path.exists("upstox_token.txt"):
         try:
             with open("upstox_token.txt","r") as f:
@@ -115,7 +114,6 @@ def get_automatic_token():
                     except: pass
         except Exception as e:
             print(f"File token error: {e}")
-    # 2. SHEET B1 ONLY - as per requirement - token fakt B1 madhe
     try:
         gc_temp = get_gspread_client()
         sh = gc_temp.open(SPREADSHEET_NAME)
@@ -135,7 +133,6 @@ def get_automatic_token():
             print(f"B1 token fetch error: {e}")
     except Exception as e:
         print(f"Sheet token fetch error: {e}")
-    # 3. ENV - last resort
     tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
     if token_looks_ok(tok):
         print(f"✅ Token from ENV: {tok[:15]}... checking validity")
@@ -146,7 +143,7 @@ def get_automatic_token():
             os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
             os.environ.pop("UPSTOX_TOKEN", None)
     print("⚠ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
-    return 
+    return None
 
 def is_token_valid(token):
     if not token or len(token) < 50:
@@ -253,7 +250,7 @@ for attempt in range(5):
         print(f"Instrument download fail {attempt+1}: {e} - retry 10 sec")
         time.sleep(10)
 else:
-    print("❌ Failed to download instruments after 5 attempts - exiting loop will retry via main.py")
+    print("❌ Failed to download instruments after 5 attempts")
     df = pd.DataFrame()
 
 mp={}
@@ -278,7 +275,6 @@ mp["CDSL"]="NSE_EQ|INE736A01011"; mp["ADANIGREEN"]="NSE_EQ|INE364U01010"
 mp["JSWENERGY"]="NSE_EQ|INE121E01018"; mp["SHRIRAMFIN"]="NSE_EQ|INE721A01047"
 mp["M&M"]="NSE_EQ|INE101A01026"; mp["BOSCHLTD"]="NSE_EQ|INE323A01026"
 mp["SOLARINDS"]="NSE_EQ|INE343H01029"; mp["MARUTI"]="NSE_EQ|INE585B01010"
-# Explicit mapping for new metal stocks (fallback if CSV miss)
 mp["HINDZINC"]="NSE_EQ|INE267A01025"
 mp["HINDCOPPER"]="NSE_EQ|INE531E01026"
 
@@ -310,12 +306,17 @@ for sec, stocks in STRUCTURE.items():
 
 print(f"Total Instruments: {len(all_keys)} - Includes HINDZINC, HINDCOPPER")
 
+# ====== V33 FIX: Candle function with retry ======
 def get_candle(k, fro, to):
     ek=urllib.parse.quote(k, safe=''); url=f"https://api.upstox.com/v3/historical-candle/{ek}/days/1/{to}/{fro}"
-    try:
-        resp=requests.get(url, headers={"Authorization": f"Bearer {UPSTOX_ACCESS_TOKEN}"}, timeout=10)
-        if resp.status_code==200: return k, resp.json().get("data",{}).get("candles",[])
-    except: pass
+    for _ in range(3):
+        try:
+            resp=requests.get(url, headers={"Authorization": f"Bearer {UPSTOX_ACCESS_TOKEN}"}, timeout=10)
+            if resp.status_code==200:
+                return k, resp.json().get("data",{}).get("candles",[])
+        except:
+            time.sleep(1)
+            pass
     return k, []
 
 def get_status(it):
@@ -323,7 +324,7 @@ def get_status(it):
     if it["ltp"]>0 and it["wl"]>0 and it["ltp"]<it["wl"]: return "BREAKDOWN"
     return ""
 
-print("Fetching weekly high/low...")
+print(f"Fetching weekly high/low... From {weekly_from} To {weekly_to}")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), all_keys):
         if candles:
@@ -331,17 +332,53 @@ with ThreadPoolExecutor(max_workers=10) as ex:
             instrument_data[k]["wh"]=float(d["high"].max()); instrument_data[k]["wl"]=float(d["low"].min())
             instrument_data[k]["prev_close"]=float(d.iloc[-1]["close"])
 
-pd_day=None
-for i in range(1,8):
-    d=(datetime.now(IST)-timedelta(days=i)).strftime("%Y-%m-%d")
-    if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
-print(f"PD Day: {pd_day}")
-with ThreadPoolExecutor(max_workers=10) as ex:
-    for k,candles in ex.map(lambda kk: get_candle(kk, pd_day, pd_day), all_keys):
-        if candles:
-            instrument_data[k]["pdh"]=float(candles[0][2]); instrument_data[k]["pdl"]=float(candles[0][3])
-            instrument_data[k]["prev_vol"]=int(candles[0][5])
-            if instrument_data[k]["prev_close"]==0: instrument_data[k]["prev_close"]=float(candles[0][4])
+# ====== V33 FIX: PDH - ACTUAL LAST TRADING DAY FIND ======
+def find_actual_last_trading_day():
+    print("🔍 Finding ACTUAL last trading day (Sat/Sun/Mon Holiday Fix)...")
+    test_key = mp.get("NIFTY 50")
+    for i in range(1, 15): # 14 divas mage paryant check
+        d = (datetime.now(IST) - timedelta(days=i)).strftime("%Y-%m-%d")
+        if datetime.strptime(d, "%Y-%m-%d").weekday() >= 5:
+            print(f" ⏭️ {d} Weekend - skip")
+            continue
+        k, candles = get_candle(test_key, d, d)
+        if candles and len(candles) > 0:
+            print(f" ✅ LAST TRADING DAY FOUND: {d} - High: {candles[0][2]} Low: {candles[0][3]}")
+            return d
+        else:
+            print(f" ⏭️ {d} No data (Holiday) - checking previous...")
+    fallback = (datetime.now(IST)-timedelta(days=1)).strftime("%Y-%m-%d")
+    print(f" ⚠️ Fallback to {fallback}")
+    return fallback
+
+pd_day = find_actual_last_trading_day()
+print(f"PD Day FINAL: {pd_day}")
+
+# PD data fetch with retry loop
+pd_fetched = False
+for retry_offset in range(0, 10):
+    check_date = (datetime.strptime(pd_day, "%Y-%m-%d") - timedelta(days=retry_offset)).strftime("%Y-%m-%d")
+    if datetime.strptime(check_date, "%Y-%m-%d").weekday() >= 5:
+        continue
+    print(f"Fetching PD for {check_date}...")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = list(ex.map(lambda kk: get_candle(kk, check_date, check_date), all_keys))
+    valid = sum(1 for k,c in results if c)
+    print(f" Got {valid}/{len(all_keys)} candles for {check_date}")
+    if valid >= len(all_keys) * 0.6: # 60% data milala tar okay
+        for k,candles in results:
+            if candles:
+                instrument_data[k]["pdh"]=float(candles[0][2]); instrument_data[k]["pdl"]=float(candles[0][3])
+                instrument_data[k]["prev_vol"]=int(candles[0][5])
+                if instrument_data[k]["prev_close"]==0:
+                    instrument_data[k]["prev_close"]=float(candles[0][4])
+        pd_day = check_date
+        pd_fetched = True
+        print(f"✅ PD DATA LOCKED for {pd_day}")
+        break
+
+if not pd_fetched:
+    print("❌ WARNING: PD data not fully found, using whatever available")
 
 def fetch_ltp(keys):
     qs = "&".join([f"instrument_key={urllib.parse.quote(k)}" for k in keys])
@@ -390,7 +427,6 @@ def build_sorted():
         status=get_status(it)
         if status and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
         rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",status,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
-        # row_map as list for duplicate symbols (e.g. MARUTI in AUTO and MOST LIQUID)
         if it["symbol"] not in row_map:
             row_map[it["symbol"]] = []
         row_map[it["symbol"]].append(rnum)
@@ -484,7 +520,7 @@ def safe_sheet_update():
             breakout_sheet.clear()
             breakout_sheet.update(values=breakout_data, range_name="A1")
             setup_permanent_colors()
-            print(f"DONE {len(row_map)} rows - Includes HINDZINC, HINDCOPPER")
+            print(f"DONE {len(row_map)} rows - Includes HINDZINC, HINDCOPPER - PD DAY {pd_day}")
             return True
         except Exception as e:
             print(f"Sheet update fail {attempt+1}: {e} - retry 10 sec")
@@ -503,7 +539,7 @@ def start_streamer_with_reconnect():
             time.sleep(60)
             continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer - MARKET HOURS 9:00-15:30... V29 Metal 8 stocks")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstox Streamer - MARKET HOURS 9:00-15:30... V33 PDH FIX")
             global UPSTOX_ACCESS_TOKEN
             UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
             if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
@@ -548,12 +584,12 @@ def start_streamer_with_reconnect():
                                     instrument_data[ikey]["change"]=(float(ltp)-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
                                 pending_updates[ikey]=float(ltp)
                                 new_status=get_status(instrument_data[ikey])
-                                if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
+                                if new_status and new_status!= prev_status and not instrument_data[ikey]["break_time"]:
                                     instrument_data[ikey]["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-                                if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
+                                if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status!= new_status:
                                     sym = instrument_data[ikey]["symbol"]
                                     last_alert = alerted_symbols.get(sym)
-                                    if last_alert != new_status:
+                                    if last_alert!= new_status:
                                         volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
                                         dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
                                         emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
@@ -577,8 +613,8 @@ def start_streamer_with_reconnect():
                                 except: pass
                     except: pass
             def on_open():
-                print("✅ LIVE CONNECTED - V31 SMOOTH NO BLINK - HINDZINC + HINDCOPPER")
-                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V31 SMOOTH - Metal + HINDZINC + HINDCOPPER</b>\nMarket screener chalu!")
+                print("✅ LIVE CONNECTED - V33 PDH HOLIDAY FIX - HINDZINC + HINDCOPPER")
+                send_telegram_alert("✅ <b>Ravi Algo LIVE CONNECTED - V33 PDH FIX - Metal + HINDZINC + HINDCOPPER</b>\nMarket screener chalu! PD fix active")
             streamer.on("open", on_open)
             streamer.on("message", on_message)
             streamer.connect()
@@ -601,7 +637,7 @@ def start_streamer_with_reconnect():
                                 try:
                                     sheet.update(values=full_sorted, range_name="A4")
                                     breakout_sheet.update(values=breakout_sorted, range_name="A1")
-                                except Exception as e: 
+                                except Exception as e:
                                     print(f"Sort err {e} - reconnecting sheets")
                                     try: connect_sheets()
                                     except: pass
