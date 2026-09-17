@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
 IST = pytz.timezone('Asia/Kolkata')
-print("FINAL V34 - PDH 100% FIX + B1 TOKEN + HOLIDAY FIX")
+print("FINAL V35 - READY - PDH + LTP LIVE FIX")
 
 def is_market_open():
     now = datetime.now(IST)
@@ -63,6 +63,13 @@ def parse_date(val):
         except: pass
     return s[:10]
 
+def is_token_valid(token):
+    if not token or len(token) < 50: return False
+    try:
+        resp = requests.get("https://api.upstox.com/v2/user/profile", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        return resp.status_code == 200
+    except: return False
+
 def get_automatic_token():
     def token_looks_ok(t): return t and len(t) > 100 and "eyJ" in str(t)
     if os.path.exists("upstox_token.txt"):
@@ -85,13 +92,6 @@ def get_automatic_token():
     if token_looks_ok(tok) and is_token_valid(tok): return tok
     return None
 
-def is_token_valid(token):
-    if not token or len(token) < 50: return False
-    try:
-        resp = requests.get("https://api.upstox.com/v2/user/profile", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        return resp.status_code == 200
-    except: return False
-
 def wait_for_valid_token():
     global UPSTOX_ACCESS_TOKEN
     while True:
@@ -99,8 +99,7 @@ def wait_for_valid_token():
         if tok and is_token_valid(tok):
             UPSTOX_ACCESS_TOKEN = tok
             return tok
-        print("⏳ Token nahi - 60 sec wait...")
-        time.sleep(60)
+        print("⏳ Token nahi - 60 sec wait..."); time.sleep(60)
 
 UPSTOX_ACCESS_TOKEN = get_automatic_token()
 if not UPSTOX_ACCESS_TOKEN or not is_token_valid(UPSTOX_ACCESS_TOKEN):
@@ -190,10 +189,8 @@ for sec, stocks in STRUCTURE.items():
             instrument_data[k]={"symbol":sym,"pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"vol":0,"prev_vol":0,"is_index":False,"change":0,"break_time":""}
             all_keys.append(k)
 
-# ====== V34 FIXED CANDLE FUNCTION ======
 def get_candle_fixed(k, from_date, to_date):
     ek=urllib.parse.quote(k, safe='')
-    # Upstox V3 needs to_date first, then from_date
     url=f"https://api.upstox.com/v3/historical-candle/{ek}/days/1/{to_date}/{from_date}"
     for _ in range(3):
         try:
@@ -216,7 +213,6 @@ with ThreadPoolExecutor(max_workers=10) as ex:
             d=pd.DataFrame(candles,columns=["datetime","open","high","low","close","volume","oi"])
             instrument_data[k]["wh"]=float(d["high"].max()); instrument_data[k]["wl"]=float(d["low"].min())
 
-# ====== V34 PDH FIX - ACTUAL LAST TRADING DAY ======
 def find_actual_last_trading_day():
     print("🔍 Finding ACTUAL last trading day...")
     test_key = mp.get("NIFTY 50")
@@ -228,15 +224,14 @@ def find_actual_last_trading_day():
         if candles and len(candles[0]) >= 6:
             h = float(candles[0][2]); l = float(candles[0][3])
             if h > 0 and l > 0 and h!= l:
-                print(f" ✅ LAST TRADING DAY FOUND: {d_str} H:{h} L:{l}")
+                print(f" ✅ LAST TRADING DAY: {d_str} H:{h} L:{l}")
                 return d_str
     return (datetime.now(IST)-timedelta(days=1)).strftime("%Y-%m-%d")
 
 pd_day = find_actual_last_trading_day()
-print(f"Fetching PD for FINAL day {pd_day}...")
+print(f"Fetching PD for {pd_day}...")
 with ThreadPoolExecutor(max_workers=10) as ex:
     results = list(ex.map(lambda kk: get_candle_fixed(kk, pd_day, pd_day), all_keys))
-
 for k,candles in results:
     if candles:
         try:
@@ -245,8 +240,7 @@ for k,candles in results:
             instrument_data[k]["prev_close"]=float(candles[0][4])
             instrument_data[k]["prev_vol"]=int(float(candles[0][5]))
         except: pass
-
-print(f"✅ PD DATA LOCKED for {pd_day} - Got {sum(1 for v in instrument_data.values() if v['pdh']>0)}/{len(all_keys)}")
+print(f"✅ PD LOCKED {pd_day} Got {sum(1 for v in instrument_data.values() if v['pdh']>0)}/{len(all_keys)}")
 
 def fetch_ltp(keys):
     qs = "&".join([f"instrument_key={urllib.parse.quote(k)}" for k in keys])
@@ -259,9 +253,8 @@ def fetch_ltp(keys):
                 if k in js.get("data",{}):
                     lp = js["data"][k].get("last_price")
                     if lp: instrument_data[k]["ltp"]=float(lp)
-    except Exception as e: print(f"LTP ERR {e}")
+    except: pass
 
-print("Fetching LTP...")
 for i in range(0, len(all_keys), 20): fetch_ltp(all_keys[i:i+20])
 today = datetime.now(IST).strftime("%Y-%m-%d")
 remaining = [k for k,v in instrument_data.items() if v["ltp"]==0]
@@ -276,9 +269,6 @@ for k,v in instrument_data.items():
     if v["wl"]==0: v["wl"]=v["ltp"]
     if v["pdh"]==0: v["pdh"]=v["ltp"]
     if v["pdl"]==0: v["pdl"]=v["ltp"]
-    if v["pdh"]==v["pdl"] and v["ltp"]>0:
-        # emergency fallback jar ajunhi same asel tar thoda gap de
-        v["pdh"]=v["pdh"]*1.005; v["pdl"]=v["pdl"]*0.995
     v["change"]=(v["ltp"]-v["prev_close"])/v["prev_close"]*100 if v["prev_close"]>0 else 0
 
 row_map={}
@@ -324,4 +314,130 @@ def build_breakout_sheet():
             for it in stock_list:
                 dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
                 rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",get_status(it),it["break_time"],datetime.now(IST).strftime("%H:%M:%S"),sec_name])
-            rows
+            rows.append([])
+    if not has_data: rows.append(["SADHYA KUTLACH INDEX BREAKOUT/BREAKDOWN NAHI"])
+    return rows
+
+def safe_sheet_update():
+    for attempt in range(3):
+        try:
+            full = build_sorted(); sheet.update(values=full, range_name="A4")
+            breakout_data = build_breakout_sheet(); breakout_sheet.clear(); breakout_sheet.update(values=breakout_data, range_name="A1")
+            print(f"DONE PD DAY {pd_day}"); return True
+        except Exception as e:
+            print(f"Sheet update fail {attempt+1}: {e}"); time.sleep(10)
+            try: connect_sheets()
+            except: pass
+    return False
+
+safe_sheet_update()
+
+def start_streamer_with_reconnect():
+    while True:
+        if not is_market_open():
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - Sleep 60 sec..."); time.sleep(60); continue
+        try:
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Streamer V35...")
+            global UPSTOX_ACCESS_TOKEN
+            UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
+            if not UPSTOX_ACCESS_TOKEN and os.path.exists("upstox_token.txt"):
+                with open("upstox_token.txt","r") as f: UPSTOX_ACCESS_TOKEN = f.read().strip()
+            if not UPSTOX_ACCESS_TOKEN:
+                print("❌ No token"); time.sleep(60); continue
+
+            configuration = upstox_client.Configuration(); configuration.access_token = UPSTOX_ACCESS_TOKEN
+            api_client = upstox_client.ApiClient(configuration)
+            streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
+
+            pending_updates={}; lock=threading.Lock(); last_sorted_keys=""
+
+            def on_message(message):
+                feeds=message.get("feeds",{})
+                for ikey, feed in feeds.items():
+                    if ikey not in instrument_data: continue
+                    ltp = None; vol = None
+                    try:
+                        if "fullFeed" in feed:
+                            ff = feed["fullFeed"]
+                            if "marketFF" in ff:
+                                mff = ff["marketFF"]
+                                ltp = mff.get("ltpc",{}).get("ltp") or mff.get("ltp")
+                                vol = mff.get("vtt") or mff.get("volume")
+                            elif "indexFF" in ff:
+                                idx = ff["indexFF"]
+                                ltp = idx.get("ltpc",{}).get("ltp") or idx.get("last_price") or idx.get("ltp")
+                                vol = 0
+                        if not ltp and "ltpc" in feed:
+                            ltp = feed["ltpc"].get("ltp")
+                        with lock:
+                            if ltp:
+                                instrument_data[ikey]["ltp"]=float(ltp)
+                                if instrument_data[ikey]["prev_close"]>0:
+                                    instrument_data[ikey]["change"]=(float(ltp)-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
+                                pending_updates[ikey]=float(ltp)
+                                if get_status(instrument_data[ikey]) and not instrument_data[ikey]["break_time"]:
+                                    instrument_data[ikey]["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
+                            if vol is not None and not instrument_data[ikey]["is_index"]:
+                                try:
+                                    v_int = int(float(vol))
+                                    if v_int>0: instrument_data[ikey]["vol"]=v_int
+                                except: pass
+                    except: pass
+
+            def on_open():
+                print("✅ LIVE CONNECTED - V35"); send_telegram_alert("✅ <b>LIVE V35 CONNECTED - LTP Running</b>")
+
+            def sheet_updater():
+                nonlocal last_sorted_keys
+                last_sort=time.time()
+                print("📊 Sheet Updater Started...")
+                while True:
+                    try:
+                        time.sleep(1)
+                        if time.time()-last_sort>=3:
+                            with lock:
+                                if pending_updates:
+                                    for ikey, ltp in list(pending_updates.items()):
+                                        if instrument_data[ikey]["prev_close"]>0:
+                                            instrument_data[ikey]["change"]=(ltp-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
+                                    pending_updates.clear()
+                                current_order="".join([f"{k}{v['change']:.2f}" for k,v in sorted(instrument_data.items(), key=lambda x: x[1]["change"], reverse=True)][:5])
+                                if current_order!=last_sorted_keys:
+                                    last_sorted_keys=current_order
+                                    full_sorted=build_sorted()
+                                    try: sheet.update(values=full_sorted, range_name="A4")
+                                    except:
+                                        try: connect_sheets()
+                                        except: pass
+                                else:
+                                    batch=[]; now_str = datetime.now(IST).strftime("%H:%M:%S")
+                                    for ikey, it in instrument_data.items():
+                                        sym=it["symbol"]
+                                        if sym in row_map:
+                                            for rnum in (row_map[sym] if isinstance(row_map[sym], list) else [row_map[sym]]):
+                                                dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0
+                                                volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
+                                                status=get_status(it)
+                                                batch.append({"range": f"F{rnum}:N{rnum}", "values": [[it["ltp"], f"{it['change']:.2f}%", it["vol"], it["prev_vol"], f"{volx:.1f}X", f"{dist:.1f}%", status, it["break_time"], now_str]]})
+                                    if batch:
+                                        try:
+                                            for i in range(0, len(batch), 50):
+                                                sheet.batch_update(batch[i:i+50])
+                                                time.sleep(0.2)
+                                        except:
+                                            try: connect_sheets()
+                                            except: pass
+                            last_sort=time.time()
+                    except Exception as e:
+                        print(f"Updater err {e}"); time.sleep(2)
+
+            threading.Thread(target=sheet_updater, daemon=True).start()
+            streamer.on("open", on_open)
+            streamer.on("message", on_message)
+            streamer.connect()
+            while True: time.sleep(10)
+        except Exception as e:
+            import traceback
+            print(f"❌ Streamer crash {e}"); time.sleep(15)
+
+start_streamer_with_reconnect()
