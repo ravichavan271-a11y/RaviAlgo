@@ -1,26 +1,7 @@
 import os, json, threading, time, logging, sys, subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz, requests
 from flask import Flask, jsonify, request, redirect
-
-# --- AUTO-INSTALL MISSING PACKAGES (pyotp fix) ---
-def auto_install(package):
-    try:
-        __import__(package)
-        print(f"✅ {package} already installed")
-    except ImportError:
-        print(f"⚠️ {package} not found - installing...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            print(f"✅ {package} installed successfully!")
-        except Exception as e:
-            print(f"❌ Failed to install {package}: {e}")
-
-# Try to auto-install critical packages
-for pkg in ["pyotp", "pandas", "gspread", "upstox_client"]:
-    try:
-        auto_install(pkg)
-    except: pass
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 import warnings
@@ -31,14 +12,13 @@ TOKEN_FILE = "upstox_token.txt"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
 
-# --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
+# --- MARKET HOURS 9:00 AM to 3:45 PM IST - Mon to Fri (FIXED AS PER YOUR REQUIREMENT) ---
 def is_market_open():
     now = datetime.now(IST)
-    # Monday=0 ... Sunday=6, market open Mon-Fri only
     if now.weekday() >= 5:  # Sat, Sun
         return False
     market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=45, second=0, microsecond=0)  # FIXED 3:45
     return market_start <= now <= market_end
 
 def get_market_status_msg():
@@ -46,16 +26,15 @@ def get_market_status_msg():
     if now.weekday() >=5:
         return f"Weekend - Market Band - {now.strftime('%A %H:%M:%S IST')}"
     market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=45, second=0, microsecond=0)
     if now < market_start:
         return f"Market Ajun Open Nahi - Open 9:00 AM - Ata {now.strftime('%H:%M:%S IST')}"
     elif now > market_end:
-        return f"Market Band Jhala - 3:30 PM - Ata {now.strftime('%H:%M:%S IST')}"
+        return f"Market Band Jhala - 3:45 PM - Ata {now.strftime('%H:%M:%S IST')}"
     else:
         return f"Market Chalu Aahe - {now.strftime('%H:%M:%S IST')}"
 
 app = Flask(__name__)
-RUN_24_7 = False  # Ata 9:00 to 3:30 only - not 24x7
 
 def send_telegram_msg(text):
     try:
@@ -65,303 +44,156 @@ def send_telegram_msg(text):
     except: pass
 
 def get_gspread_client_main():
-    """Get gspread client from FILE, SECRET FILE, or ENV"""
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    possible_paths = [
-        "service_account.json",
-        "./service_account.json",
-        "/etc/secrets/service_account.json",
-        "/etc/secrets/SERVICE_ACCOUNT_JSON",
-        os.path.join(os.getcwd(), "service_account.json")
-    ]
-    for SERVICE_FILE in possible_paths:
+    for SERVICE_FILE in ["service_account.json", "./service_account.json", "/etc/secrets/service_account.json"]:
         if os.path.exists(SERVICE_FILE):
             try:
-                print(f"✅ Using service_account.json FILE (main) at {SERVICE_FILE}")
+                print(f"✅ Using service_account.json FILE at {SERVICE_FILE}")
                 return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_FILE, scope))
             except Exception as e:
-                print(f"❌ File auth failed (main) at {SERVICE_FILE}: {e}")
-    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("GOOGLE_CREDENTIALS", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+                print(f"❌ File auth failed at {SERVICE_FILE}: {e}")
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
     if env_json:
         try:
             import json as js
             creds_dict = js.loads(env_json)
-            print(f"✅ Using service_account from ENV (main) length {len(env_json)}")
+            print(f"✅ Using service_account from ENV length {len(env_json)}")
             return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
         except Exception as e:
-            print(f"❌ ENV auth failed (main): {e}")
-            try:
-                with open("service_account.json", "w") as f:
-                    f.write(env_json)
-                return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope))
-            except Exception as e2:
-                print(f"❌ ENV to file failed (main): {e2}")
-    print(f"❌ NO service_account found in main")
-    try:
-        print(f"📁 Current dir: {os.listdir('.')[:20]}")
-        if os.path.exists("/etc/secrets"):
-            print(f"📁 /etc/secrets: {os.listdir('/etc/secrets')[:20]}")
-    except: pass
+            print(f"❌ ENV auth failed: {e}")
     raise Exception("service_account.json missing")
 
+def is_token_valid(token):
+    if not token or len(token)<50: return False
+    try:
+        r = requests.get("https://api.upstox.com/v2/user/profile", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if r.status_code==200:
+            print("✅ Token VALID")
+            return True
+        else:
+            print(f"❌ Token INVALID: {r.status_code} - {r.text[:100]}")
+            return False
+    except Exception as e:
+        print(f"Token check error: {e}")
+        return False  # FIXED: was return True before - BUG
+
 def get_token_automatic():
-    # Quick check - no heavy calls for /upstox-login speed
-    def token_ok(t):
-        return t and len(t) > 100 and "eyJ" in str(t)
+    def token_ok(t): return t and len(t)>100 and "eyJ" in str(t)
     
-    # 1. FILE
+    # 1. ENV first (fastest)
+    tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
+    if token_ok(tok) and is_token_valid(tok):
+        return tok
+    
+    # 2. FILE
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE,"r") as f: 
                 tok=f.read().strip()
-            if token_ok(tok):
-                if is_token_valid(tok):
-                    os.environ["UPSTOX_ACCESS_TOKEN"]=tok
-                    return tok
+            if token_ok(tok) and is_token_valid(tok):
+                os.environ["UPSTOX_ACCESS_TOKEN"]=tok
+                return tok
         except: pass
     
-    # 2. ENV - check validity
-    tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
-    if token_ok(tok):
-        if is_token_valid(tok):
-            return tok
-        else:
-            # Clear expired ENV
-            os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
-    
-    # 3. SHEET B1
+    # 3. SHEET B1 - MOST IMPORTANT FOR AUTOMATIC
     try:
         gc = get_gspread_client_main()
         sh = gc.open("Dsheet")
-        try:
-            b1 = str(sh.sheet1.cell(1,2).value or "").strip()
-            if token_ok(b1) and is_token_valid(b1):
+        b1 = str(sh.sheet1.cell(1,2).value or "").strip()
+        if token_ok(b1):
+            if is_token_valid(b1):
+                print(f"✅ Token from SHEET B1 length {len(b1)}")
                 with open(TOKEN_FILE,"w") as f: f.write(b1)
                 os.environ["UPSTOX_ACCESS_TOKEN"]=b1
                 return b1
-        except Exception as e:
-            print(f"B1 fetch error main: {e}")
+            else:
+                print("B1 token invalid/expired")
     except Exception as e:
-        print(f"get_token_automatic sheet error main: {e}")
-    return ""
-
-def is_token_valid(token):
-    try:
-        r = requests.get("https://api.upstox.com/v2/user/profile", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        return r.status_code == 200
-    except:
-        return True
-
-def get_token():
-    return get_token_automatic()
+        print(f"B1 fetch error: {e}")
+    
+    print("⚠ No valid token found - will wait for /upstox-login")
+    return None
 
 file_status = {
-    "kavyadarsh": {"running": False, "last_start": "", "error": "", "count": 0, "file_exists": False},
-    "upstock4": {"running": False, "last_start": "", "error": "", "count": 0, "file_exists": False}
+    "kavyadarsh": {"running": False, "last_start": "", "error": "", "count": 0},
+    "upstock4": {"running": False, "last_start": "", "error": "", "count": 0}
 }
 
-def check_files():
-    file_status["kavyadarsh"]["file_exists"] = os.path.exists("KavyaDarsh.py") or os.path.exists("kavyadarsh.py")
-    file_status["upstock4"]["file_exists"] = os.path.exists("Upstock4.py") or os.path.exists("upstock4.py")
-
 def run_kavyadarsh():
-    global file_status
-    check_files()
     while True:
-        # --- MARKET HOURS CHECK 9:00 to 3:30 ---
         if not is_market_open():
-            file_status["kavyadarsh"]["running"] = False
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - KavyaDarsh Sleep 60 sec...")
+            file_status["kavyadarsh"]["running"]=False
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {get_market_status_msg()} - KavyaDarsh Sleep 60s")
             time.sleep(60)
             continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - MARKET HOURS 9:00-3:30 (Angel One - Auto TOTP)")
-            # Auto-install pyotp before import
-            try:
-                import pyotp
-            except ImportError:
-                print("pyotp missing in KavyaDarsh - installing...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "pyotp"])
-                import pyotp
-            file_status["kavyadarsh"]["running"] = True
-            file_status["kavyadarsh"]["last_start"] = datetime.now(IST).isoformat()
-            file_status["kavyadarsh"]["count"] += 1
-            file_status["kavyadarsh"]["error"] = ""
-            if os.path.exists("KavyaDarsh.py"):
-                if 'KavyaDarsh' in sys.modules: del sys.modules['KavyaDarsh']
-                import KavyaDarsh
-            elif os.path.exists("kavyadarsh.py"):
-                if 'kavyadarsh' in sys.modules: del sys.modules['kavyadarsh']
-                import kavyadarsh
-            else:
-                file_status["kavyadarsh"]["error"] = "File not found"
-                file_status["kavyadarsh"]["running"] = False
-                time.sleep(30)
-                continue
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting KavyaDarsh.py - 9:00-3:45")
+            file_status["kavyadarsh"]["running"]=True
+            file_status["kavyadarsh"]["last_start"]=datetime.now(IST).isoformat()
+            file_status["kavyadarsh"]["count"]+=1
+            if 'KavyaDarsh' in sys.modules: del sys.modules['KavyaDarsh']
+            import KavyaDarsh
         except Exception as e:
             import traceback
-            err = str(e)[:500]
-            tb = traceback.format_exc()[:1000]
-            print(f"KavyaDarsh CRASHED: {err}\n{tb}")
-            file_status["kavyadarsh"]["error"] = err
-            file_status["kavyadarsh"]["running"] = False
-            time.sleep(5)
+            print(f"KavyaDarsh CRASHED: {e}\n{traceback.format_exc()[:500]}")
+            file_status["kavyadarsh"]["running"]=False
+            time.sleep(10)
 
 def run_upstox():
-    global file_status
-    check_files()
     while True:
-        # --- MARKET HOURS CHECK 9:00 to 3:30 ---
         if not is_market_open():
-            file_status["upstock4"]["running"] = False
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S IST')}] {get_market_status_msg()} - Upstock4 Sleep 60 sec...")
+            file_status["upstock4"]["running"]=False
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {get_market_status_msg()} - Upstock4 Sleep 60s")
             time.sleep(60)
             continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - MARKET HOURS 9:00-3:30 (Magachya sheet sarkha)")
-            file_status["upstock4"]["running"] = True
-            file_status["upstock4"]["last_start"] = datetime.now(IST).isoformat()
-            file_status["upstock4"]["count"] += 1
-            file_status["upstock4"]["error"] = ""
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - 9:00-3:45")
+            file_status["upstock4"]["running"]=True
+            file_status["upstock4"]["last_start"]=datetime.now(IST).isoformat()
+            file_status["upstock4"]["count"]+=1
             tok = get_token_automatic()
             if not tok:
-                print("WARNING: Token not found - will try auto fetch from sheet/file")
-                send_telegram_msg(f"⚠️ Upstox Token missing! Login: https://ravialgo.onrender.com/upstox-login")
-            else:
-                print(f"Token found: {tok[:15]}... valid check...")
-                if not is_token_valid(tok):
-                    print("Token INVALID/EXPIRED - sending Telegram")
-                    send_telegram_msg(f"⚠️ <b>Upstox Token Expired!</b>\nLogin: https://ravialgo.onrender.com/upstox-login\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
-            if os.path.exists("Upstock4.py"):
-                import sys
-                if 'Upstock4' in sys.modules: del sys.modules['Upstock4']
-                import Upstock4
-            elif os.path.exists("upstock4.py"):
-                import sys
-                if 'upstock4' in sys.modules: del sys.modules['upstock4']
-                import upstock4
-            else:
-                file_status["upstock4"]["error"] = "File not found"
-                file_status["upstock4"]["running"] = False
-                time.sleep(30)
+                send_telegram_msg(f"⚠ Upstox Token missing! Login: https://ravialgo.onrender.com/upstox-login")
+                print("Waiting 60s for token...")
+                time.sleep(60)
                 continue
+            if 'Upstock4' in sys.modules: del sys.modules['Upstock4']
+            import Upstock4
         except Exception as e:
             import traceback
-            err = str(e)[:500]
-            print(f"Upstock4 CRASHED: {err}\n{traceback.format_exc()[:500]}")
-            file_status["upstock4"]["error"] = err
-            file_status["upstock4"]["running"] = False
-            time.sleep(5)
-
-def send_telegram():
-    try:
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload={"chat_id": TELEGRAM_CHAT_ID, "text": f"✅ <b>24x7 AUTOMATIC TOKEN MODE ACTIVE</b>\n\nUpstock4.py (Upstox - Auto Token from Sheet/ENV/File) - Magachya sheet sarkha!\nKavyaDarsh.py (Angel One - Auto TOTP)\n\nUpstox Login: https://ravialgo.onrender.com/upstox-login\n\nTime: {datetime.now(IST).strftime('%H:%M:%S')}", "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=10)
-        print("Telegram 24x7 alert sent")
-    except Exception as e:
-        print(f"Telegram error: {e}")
-
-def keep_alive():
-    while True:
-        try:
-            try: requests.get('https://ravialgo.onrender.com/ping',timeout=5)
-            except: pass
-            time.sleep(300)
-        except: time.sleep(60)
+            print(f"Upstock4 CRASHED: {e}\n{traceback.format_exc()[:500]}")
+            file_status["upstock4"]["running"]=False
+            time.sleep(10)
 
 def auto_token_watcher():
     while True:
         try:
-            time.sleep(300)
+            time.sleep(300) # 5 min
             tok = get_token_automatic()
-            if not tok or not is_token_valid(tok):
-                print("Auto Watcher: Token expired/missing - Telegram alert")
-                send_telegram_msg(f"⚠️ <b>Auto Token Watcher</b>\nUpstox token expired/missing!\n\n1-click Login: https://ravialgo.onrender.com/upstox-login\n\nTumhi Dsheet madhe B1 cell madhe navin token takla tar auto gheil!\nTime: {datetime.now(IST).strftime('%H:%M:%S IST')}")
+            if not tok:
+                send_telegram_msg(f"⚠ <b>Token Expired</b>\nLogin: https://ravialgo.onrender.com/upstox-login\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
         except Exception as e:
-            print(f"Auto watcher error: {e}")
-            time.sleep(60)
+            print(f"Watcher err {e}"); time.sleep(60)
 
 @app.route('/')
 def home():
-    tok = get_token_automatic()
-    valid = is_token_valid(tok) if tok else False
-    return f'''
-    <h1>✅ 24x7 AUTOMATIC TOKEN MODE - Magachya Sheet Sarkha</h1>
-    <p>Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}</p>
-    <p><b>Angel One (KavyaDarsh):</b> Auto TOTP - No daily token needed ✅ - Roj lagat nahi!</p>
-    <p><b>Upstox (Upstock4):</b> Automatic Token - Sheet/ENV/File ✅ - Roj lagto pan AUTOMATIC!</p>
-    <p><b>Token Status:</b> Exists={bool(tok)} Valid={valid} File={os.path.exists(TOKEN_FILE)}</p>
-    <hr>
-    <p><a href="/status">/status - JSON Status</a></p>
-    <p><a href="/logs">/logs - Logs</a></p>
-    <p><a href="/ping">/ping</a></p>
-    <p><a href="/upstox-login"><b>/upstox-login - 1 Click Login (Daily 8:30 AM)</b></a></p>
-    <hr>
-    <p><b>Automatic Logic (Magachya sheet sarkha):</b></p>
-    <p>1. ENV token -> 2. File token -> 3. Sheet B1 cell token -> Auto!</p>
-    '''
+    tok=get_token_automatic()
+    return f"<h1>✅ 9:00-3:45 AUTO MODE</h1><p>Time: {datetime.now(IST)}<br>Token Exists: {bool(tok)}<br><a href='/upstox-login'>Login</a> | <a href='/status'>Status</a></p>"
 
 @app.route('/ping')
-def ping():
-    return f"PONG {datetime.now(IST).strftime('%H:%M:%S')} AutoToken={bool(get_token_automatic())} Upstock4={file_status['upstock4']['running']} KavyaDarsh={file_status['kavyadarsh']['running']}",200
+def ping(): return f"PONG {datetime.now(IST)} MarketOpen={is_market_open()}",200
 
 @app.route('/status')
 def status():
-    check_files()
-    tok = get_token_automatic()
-    return jsonify({
-        "time": datetime.now(IST).isoformat(),
-        "mode": "AUTOMATIC TOKEN - Sheet/ENV/File - Magachya sheet sarkha",
-        "angel_one": "Auto TOTP - No daily token",
-        "upstox": "Roj token lagto - pan AUTOMATIC from Sheet/ENV/File",
-        "token_automatic": {
-            "exists": bool(tok),
-            "valid": is_token_valid(tok) if tok else False,
-            "source": "ENV" if os.environ.get("UPSTOX_ACCESS_TOKEN") else ("FILE" if os.path.exists(TOKEN_FILE) else "NONE"),
-            "preview": f"{tok[:15]}...{tok[-5:]}" if tok else "NO TOKEN"
-        },
-        "files": file_status,
-        "token_file_exists": os.path.exists(TOKEN_FILE),
-        "env_token_exists": bool(os.environ.get("UPSTOX_ACCESS_TOKEN")),
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-    })
-
-@app.route('/logs')
-def logs():
-    check_files()
-    tok = get_token_automatic()
-    valid = is_token_valid(tok) if tok else False
-    html = f'''
-    <html><head><meta http-equiv="refresh" content="10"></head><body>
-    <h2>🔥 AUTOMATIC TOKEN - {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} (Auto refresh 10s)</h2>
-    <p><b>Angel One:</b> Auto TOTP (Token lagat nahi) | <b>Upstox:</b> Automatic (Sheet/ENV/File) - Roj lagto pan auto!</p>
-    <p><b>Token:</b> Exists={bool(tok)} Valid={valid} Source={"ENV" if os.environ.get("UPSTOX_ACCESS_TOKEN") else "FILE" if os.path.exists(TOKEN_FILE) else "NONE"}</p>
-    <hr>
-    <h3>Upstock4.py (Upstox - Roj token lagto - AUTOMATIC - Magachya sheet sarkha)</h3>
-    <p>Running: {file_status["upstock4"]["running"]} | Count: {file_status["upstock4"]["count"]}<br>Error: {file_status["upstock4"]["error"]}</p>
-    <hr>
-    <h3>KavyaDarsh.py (Angel One - Token lagat nahi - Auto)</h3>
-    <p>Running: {file_status["kavyadarsh"]["running"]} | Count: {file_status["kavyadarsh"]["count"]}<br>Error: {file_status["kavyadarsh"]["error"]}</p>
-    <hr>
-    <p><b>How Automatic Works (Magachya sheet sarkha):</b><br>
-    1. ENV var UPSTOX_ACCESS_TOKEN check<br>
-    2. File upstox_token.txt check<br>
-    3. Dsheet Google Sheet B1 cell check (tu tithe token taklas tar auto gheil)<br>
-    4. /upstox-login ne login kelas tar auto save to FILE + ENV + SHEET B1</p>
-    <p><a href="/status">JSON</a> | <a href="/ping">Ping</a> | <a href="/">Home</a> | <a href="/upstox-login"><b>LOGIN</b></a></p>
-    </body></html>
-    '''
-    return html
+    tok=get_token_automatic()
+    return jsonify({"time": datetime.now(IST).isoformat(), "market_open": is_market_open(), "market_msg": get_market_status_msg(), "token_exists": bool(tok), "files": file_status})
 
 @app.route('/upstox-login')
 def upstox_login():
     api_key=os.environ.get("UPSTOX_API_KEY")
-    if not api_key:
-        return "UPSTOX_API_KEY not set in ENV", 400
+    if not api_key: return "UPSTOX_API_KEY not set",400
     redirect_uri="https://ravialgo.onrender.com/upstox/callback"
     url=f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
     return redirect(url)
@@ -369,14 +201,12 @@ def upstox_login():
 @app.route('/upstox/callback')
 def upstox_callback():
     code=request.args.get("code")
-    api_key=os.environ.get("UPSTOX_API_KEY")
-    api_secret=os.environ.get("UPSTOX_API_SECRET")
+    api_key=os.environ.get("UPSTOX_API_KEY"); api_secret=os.environ.get("UPSTOX_API_SECRET")
     redirect_uri="https://ravialgo.onrender.com/upstox/callback"
     try:
         url="https://api.upstox.com/v2/login/authorization/token"
-        headers={'accept':'application/json','Content-Type':'application/x-www-form-urlencoded'}
         data={'code':code,'client_id':api_key,'client_secret':api_secret,'redirect_uri':redirect_uri,'grant_type':'authorization_code'}
-        resp=requests.post(url,headers=headers,data=data,timeout=10)
+        resp=requests.post(url, headers={'accept':'application/json','Content-Type':'application/x-www-form-urlencoded'}, data=data, timeout=10)
         token_data=resp.json()
         access_token=token_data.get('access_token')
         if access_token:
@@ -386,46 +216,25 @@ def upstox_callback():
                 gc = get_gspread_client_main()
                 sh = gc.open("Dsheet")
                 sh.sheet1.update_cell(1,2, access_token)
-                print("Token also saved to Sheet B1 for automatic!")
-            except Exception as e:
-                print(f"Sheet save error (ignore): {e}")
-            send_telegram_msg(f"✅ <b>Upstox Token Saved Automatically!</b>\nMagachya sheet sarkha automatic zala!\nTime: {datetime.now(IST).strftime('%H:%M:%S')}")
-            return f"<h1>✅ Token Save! AUTOMATIC MODE - Magachya Sheet Sarkha</h1><p>Token saved to FILE + ENV + SHEET B1!</p><p>Upstock4.py auto-restart hoil!</p><a href='/logs'>Logs</a> | <a href='/status'>Status</a>"
+                print("✅ Token saved to SHEET B1")
+            except Exception as e: print(f"Sheet save err: {e}")
+            send_telegram_msg(f"✅ Token Saved Auto! Time: {datetime.now(IST)}")
+            return f"<h1>✅ Token Saved to Sheet B1!</h1><p>9:00-3:45 auto chalel</p><a href='/'>Home</a>"
         else: return f"Error: {token_data}"
     except Exception as e: return f"Error: {e}"
 
-print("=== STARTING 24x7 AUTOMATIC TOKEN MODE - MAGACHYA SHEET SARKHA - FAST PORT BIND FIX ===")
-check_files()
+print("=== STARTING 9:00-3:45 AUTO TOKEN MODE - FIXED ===")
 
-# --- CRITICAL FIX: Delay heavy threads by 10 sec so /upstox-login port binds FAST ---
-# Magashi mast chalat hota pan redeploy nantar login page open hot nahi - karan KavyaDarsh.py import heavy aahe
-# Tya mule gunicorn worker boot slow - Render thinks port not open
 def delayed_start():
-    print("⏳ Waiting 10 sec for Flask port bind - then starting background algos...")
+    print("⏳ Waiting 10 sec for Flask bind...")
     time.sleep(10)
-    try:
-        threading.Thread(target=run_kavyadarsh,daemon=True).start()
-        print("✅ KavyaDarsh thread started (delayed)")
-    except Exception as e:
-        print(f"❌ KavyaDarsh thread failed: {e}")
-    try:
-        threading.Thread(target=run_upstox,daemon=True).start()
-        print("✅ Upstock4 thread started (delayed)")
-    except Exception as e:
-        print(f"❌ Upstock4 thread failed: {e}")
-    try:
-        threading.Thread(target=send_telegram,daemon=True).start()
-        threading.Thread(target=keep_alive,daemon=True).start()
-        threading.Thread(target=auto_token_watcher,daemon=True).start()
-        print("✅ Helper threads started (delayed)")
-    except Exception as e:
-        print(f"❌ Helper threads failed: {e}")
+    threading.Thread(target=run_kavyadarsh,daemon=True).start()
+    threading.Thread(target=run_upstox,daemon=True).start()
+    threading.Thread(target=auto_token_watcher,daemon=True).start()
+    print("✅ All threads started - 9:00-3:45 - Token Auto from B1")
 
-# Start delayed starter in background - Flask binds port IMMEDIATELY
 threading.Thread(target=delayed_start,daemon=True).start()
-print("✅ Fast port bind - Flask ready instantly! Background algos start in 10 sec - /upstox-login ready!")
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
-    print(f"Flask starting on port {port} - AUTOMATIC TOKEN MODE")
     app.run(host='0.0.0.0',port=port, threaded=True)
