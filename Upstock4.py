@@ -15,7 +15,7 @@ print("FINAL V32 - B1 TOKEN ONLY + B2 B3 DATE + SMOOTH - HINDZINC HINDCOPPER - M
 # --- MARKET HOURS 9:00 AM to 3:30 PM IST - Mon to Fri ---
 def is_market_open():
     now = datetime.now(IST)
-    if now.weekday() >= 5:  # Sat, Sun
+    if now.weekday() >= 5: # Sat, Sun
         return False
     market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
     market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -146,7 +146,7 @@ def get_automatic_token():
             os.environ.pop("UPSTOX_ACCESS_TOKEN", None)
             os.environ.pop("UPSTOX_TOKEN", None)
     print("⚠ No valid token found - will wait for /upstox-login - https://ravialgo.onrender.com/upstox-login")
-    return 
+    return
 
 def is_token_valid(token):
     if not token or len(token) < 50:
@@ -238,7 +238,7 @@ STRUCTURE = {
     "NIFTY FMCG": ["HINDUNILVR","NESTLEIND","BRITANNIA","TATACONSUM","VBL","GODREJCP","COLPAL"],
     "NIFTY ENERGY": ["POWERGRID","COALINDIA","CGPOWER","ADANIGREEN","JSWENERGY"],
     "NIFTY PHARMA": ["DRREDDY","TORNTPHARM","LUPIN","SUNPHARMA","CIPLA","DIVISLAB","GLENMARK","ZYDU","LAURUSLABS"],
-    "MOST LIQUID STOCKS": ["MARUTI","TRENT","POLYCAB","DIXON","BAJAJ-AUTO","PERSISTENT","BSE","INDIGO","BOSCHLTD","OFSS","ABB","SOLARINDS"]
+    "MOST LIQUID STOCKS": ["MARUTI","TRENT","POLYCAB","DIXON","BAJAJ-AUTO","PERSISTENT","BSE","INDIGO","BOSCHLTD","OFSS","ABB","SOLARINDS","POWERINDIA"]
 }
 
 print("Downloading instrument list...")
@@ -548,12 +548,12 @@ def start_streamer_with_reconnect():
                                     instrument_data[ikey]["change"]=(float(ltp)-instrument_data[ikey]["prev_close"])/instrument_data[ikey]["prev_close"]*100
                                 pending_updates[ikey]=float(ltp)
                                 new_status=get_status(instrument_data[ikey])
-                                if new_status and new_status != prev_status and not instrument_data[ikey]["break_time"]:
+                                if new_status and new_status!= prev_status and not instrument_data[ikey]["break_time"]:
                                     instrument_data[ikey]["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-                                if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status != new_status:
+                                if new_status in ["BREAKOUT","BREAKDOWN"] and prev_status!= new_status:
                                     sym = instrument_data[ikey]["symbol"]
                                     last_alert = alerted_symbols.get(sym)
-                                    if last_alert != new_status:
+                                    if last_alert!= new_status:
                                         volx = instrument_data[ikey]["vol"]/instrument_data[ikey]["prev_vol"] if instrument_data[ikey]["prev_vol"]>0 else 0
                                         dist = instrument_data[ikey]["ltp"]/instrument_data[ikey]["wh"]*100 if instrument_data[ikey]["wh"]>0 else 0
                                         emoji = "🚀" if new_status=="BREAKOUT" else "🔻"
@@ -601,7 +601,7 @@ def start_streamer_with_reconnect():
                                 try:
                                     sheet.update(values=full_sorted, range_name="A4")
                                     breakout_sheet.update(values=breakout_sorted, range_name="A1")
-                                except Exception as e: 
+                                except Exception as e:
                                     print(f"Sort err {e} - reconnecting sheets")
                                     try: connect_sheets()
                                     except: pass
