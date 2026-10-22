@@ -8,12 +8,12 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V73 FIXED V2 - SyntaxError Fixed - WEBSOCKET + REST FALLBACK - NO BLINK")
+print("FINAL V80 - WORKING LIVE + PD FIX")
 
 IST = pytz.timezone('Asia/Kolkata')
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "Dsheet")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8255515384:AAEREJpnfiMkr3vOjBhgRBgCTZNUbPcpyHI")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7602442830")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 ALERTED = set()
 
@@ -22,8 +22,7 @@ def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200: print(f"✅ Telegram Sent")
+        requests.post(url, json=payload, timeout=10)
     except: pass
 
 def get_gspread_client():
@@ -33,7 +32,7 @@ def get_gspread_client():
     if env_json:
         try: return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(js.loads(env_json), scope))
         except: pass
-    for p in ["service_account.json", "./service_account.json", "/app/service_account.json"]:
+    for p in ["service_account.json", "./service_account.json", "/app/service_account.json", "/etc/secrets/service_account.json"]:
         if os.path.exists(p):
             try: return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(p, scope))
             except: pass
@@ -51,42 +50,29 @@ def get_token():
     raise Exception("UPSTOX_ACCESS_TOKEN missing")
 
 UPSTOX_ACCESS_TOKEN = get_token()
-print(f"Token OK {UPSTOX_ACCESS_TOKEN[:20]}...")
 
 def is_market_time():
     now = datetime.now(IST)
     if now.weekday() >= 5: return False
     if 9 <= now.hour < 15: return True
-    if now.hour == 15 and now.minute <= 40: return True
+    if now.hour == 15 and now.minute < 45: return True
     return False
 
 def wait_until_market():
     while True:
         now = datetime.now(IST)
-        day_name = now.strftime('%A')
         if now.weekday() >= 5:
             next_monday = now + timedelta(days=(7 - now.weekday()))
             next_monday = next_monday.replace(hour=9, minute=0, second=0, microsecond=0)
             sleep_sec = (next_monday - now).total_seconds()
-            print(f"📅 WEEKEND {day_name} - Next MONDAY {next_monday.strftime('%d %b %H:%M IST')} - Sleeping {int(sleep_sec/3600)}h")
+            print(f"📅 WEEKEND {now.strftime('%A')} - Sleeping {int(sleep_sec/3600)}h")
             time.sleep(min(sleep_sec, 3600))
             continue
         if is_market_time():
-            print(f"✅ {day_name} Market Time {now.strftime('%H:%M:%S IST')} - Starting...")
+            print(f"✅ {now.strftime('%A')} Market Time {now.strftime('%H:%M:%S IST')} - Starting...")
             ALERTED.clear()
             return True
-        if now.hour < 9:
-            next_run = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            sleep_sec = (next_run - now).total_seconds()
-            print(f"⏰ {day_name} {now.strftime('%H:%M')} - Market 9 AM - Sleeping {int(sleep_sec/60)} min...")
-            time.sleep(min(sleep_sec, 300))
-        else:
-            next_run = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            while next_run.weekday() >= 5:
-                next_run = next_run + timedelta(days=1)
-            sleep_sec = (next_run - now).total_seconds()
-            print(f"⏰ Market closed {now.strftime('%H:%M')} - Next run {next_run.strftime('%A %d %b %H:%M')} - Sleeping {int(sleep_sec/60)} min...")
-            time.sleep(min(sleep_sec, 300))
+        time.sleep(60)
 
 print("Downloading instruments...")
 r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
@@ -164,11 +150,6 @@ def build_sorted(instrument_data):
         dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
         st=get_status(it)
         if st and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-        key = f"{it['symbol']}_{st}"
-        if st in ["BREAKOUT","BREAKDOWN"] and key not in ALERTED:
-            ALERTED.add(key)
-            msg = f"🚀 <b>{it['symbol']} {st}</b>\n📊 INDEX\n💰 LTP: {it['ltp']}\n📈 Week {'High' if st=='BREAKOUT' else 'Low'}: {it['wh'] if st=='BREAKOUT' else it['wl']}\n⏰ {it['break_time']}\n📅 {datetime.now(IST).strftime('%d %b %H:%M:%S')}"
-            send_telegram(msg)
         rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",st,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
     rows.append([])
     for sec_name in STRUCTURE.keys():
@@ -178,12 +159,6 @@ def build_sorted(instrument_data):
             dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
             st=get_status(it)
             if st and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-            key = f"{it['symbol']}_{st}"
-            if st in ["BREAKOUT","BREAKDOWN"] and key not in ALERTED:
-                ALERTED.add(key)
-                emoji = "🚀" if st=="BREAKOUT" else "🔻"
-                msg = f"{emoji} <b>{it['symbol']} {st}</b>\n📊 {sec_name}\n💰 LTP: {it['ltp']} ({it['change']:.2f}%)\n📈 Week {'High' if st=='BREAKOUT' else 'Low'}: {it['wh'] if st=='BREAKOUT' else it['wl']}\n📦 VOL: {volx:.1f}X\n⏰ {it['break_time']}\n📅 {datetime.now(IST).strftime('%d %b %H:%M:%S')}"
-                send_telegram(msg)
             rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",st,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
         rows.append([])
     return rows
@@ -209,6 +184,9 @@ def build_breakout(instrument_data):
     if not has: rows.append([]); rows.append(["SADHYA KUTLACH INDEX BREAKOUT/BREAKDOWN NAHI"])
     return rows
 
+def _cf_rule(sheet, col, condition, bg, fg, bold=True):
+    return {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": col, "endColumnIndex": col+1}], "booleanRule": {"condition": condition, "format": {"backgroundColor": bg, "textFormat": {"foregroundColor": fg, "bold": bold}}}}, "index": 0}}
+
 def apply_dark_colours(sheet):
     DARK_GREEN = {"red": 0.0, "green": 0.4, "blue": 0.0}
     DARK_RED = {"red": 0.5, "green": 0.0, "blue": 0.0}
@@ -222,16 +200,18 @@ def apply_dark_colours(sheet):
         sheet.spreadsheet.batch_update({"requests": del_req})
     except: pass
     time.sleep(0.5)
+    def formula(f): return {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f}]}
+    def contains(t): return {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": t}]}
     requests_list = [
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 1, "endColumnIndex": 2}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=AND($F5<>\"\",$B5<>\"\",$F5>=$B5)"}]}, "format": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 2, "endColumnIndex": 3}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=AND($F5<>\"\",$C5<>\"\",$F5<=$C5)"}]}, "format": {"backgroundColor": DARK_RED, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 3, "endColumnIndex": 4}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=AND($F5<>\"\",$D5<>\"\",$F5>=$D5)"}]}, "format": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 4, "endColumnIndex": 5}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=AND($F5<>\"\",$E5<>\"\",$F5<=$E5)"}]}, "format": {"backgroundColor": DARK_RED, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 11, "endColumnIndex": 12}], "booleanRule": {"condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "BREAKOUT"}]}, "format": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 11, "endColumnIndex": 12}], "booleanRule": {"condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "BREAKDOWN"}]}, "format": {"backgroundColor": DARK_RED, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=IFERROR(VALUE(SUBSTITUTE($J5,\"X\",\"\"))>=3, FALSE)"}]}, "format": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=IFERROR(VALUE(SUBSTITUTE($J5,\"X\",\"\"))>=2, FALSE)"}]}, "format": {"backgroundColor": LIGHT_GREEN_VOL, "textFormat": {"foregroundColor": BLACK_TEXT, "bold": True}}}}, "index": 0}},
-        {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sheet.id, "startRowIndex": 4, "endRowIndex": 2000, "startColumnIndex": 9, "endColumnIndex": 10}], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=IFERROR(VALUE(SUBSTITUTE($J5,\"X\",\"\"))>=1, FALSE)"}]}, "format": {"backgroundColor": YELLOW_VOL, "textFormat": {"foregroundColor": BLACK_TEXT, "bold": False}}}}, "index": 0}},
+        _cf_rule(sheet, 1, formula('=AND($F5<>"",$B5<>"",$F5>=$B5)'), DARK_GREEN, WHITE_TEXT),
+        _cf_rule(sheet, 2, formula('=AND($F5<>"",$C5<>"",$F5<=$C5)'), DARK_RED, WHITE_TEXT),
+        _cf_rule(sheet, 3, formula('=AND($F5<>"",$D5<>"",$F5>=$D5)'), DARK_GREEN, WHITE_TEXT),
+        _cf_rule(sheet, 4, formula('=AND($F5<>"",$E5<>"",$F5<=$E5)'), DARK_RED, WHITE_TEXT),
+        _cf_rule(sheet, 11, contains("BREAKOUT"), DARK_GREEN, WHITE_TEXT),
+        _cf_rule(sheet, 11, contains("BREAKDOWN"), DARK_RED, WHITE_TEXT),
+        _cf_rule(sheet, 9, formula('=IFERROR(VALUE(SUBSTITUTE($J5,"X",""))>=3, FALSE)'), DARK_GREEN, WHITE_TEXT),
+        _cf_rule(sheet, 9, formula('=IFERROR(VALUE(SUBSTITUTE($J5,"X",""))>=2, FALSE)'), LIGHT_GREEN_VOL, BLACK_TEXT),
+        _cf_rule(sheet, 9, formula('=IFERROR(VALUE(SUBSTITUTE($J5,"X",""))>=1, FALSE)'), YELLOW_VOL, BLACK_TEXT, False),
     ]
     try:
         sheet.spreadsheet.batch_update({"requests": requests_list})
@@ -320,20 +300,30 @@ def run_once():
     weekly_to = parse_date(b3_val)
     print(f"Weekly {weekly_from} to {weekly_to}")
 
-    def get_today_ltp_day_inner():
-        now = datetime.now(IST)
-        if now.weekday() < 5: return now.strftime("%Y-%m-%d")
-        d=now
-        while True:
-            d=d-timedelta(days=1)
-            if d.weekday()<5: return d.strftime("%Y-%m-%d")
-    def get_pd_day_inner(s):
-        d = datetime.strptime(s, "%Y-%m-%d")
-        while True:
+    # === V80 PD FIX - AAJ + KAL BAND TAR PARVA ===
+    def get_previous_trading_day(from_date_str):
+        sample_key = mp.get("NIFTY 50")
+        d = datetime.strptime(from_date_str, "%Y-%m-%d")
+        for _ in range(15):
             d = d - timedelta(days=1)
-            if d.weekday() < 5: return d.strftime("%Y-%m-%d")
-    ltp_day = get_today_ltp_day_inner()
-    pd_day = get_pd_day_inner(ltp_day)
+            if d.weekday() >= 5: continue
+            s = d.strftime("%Y-%m-%d")
+            _, candles = get_candle(sample_key, s, s)
+            if candles:
+                return s
+            print(f"❌ {s} sutti, parva check...")
+        return from_date_str
+
+    def find_real_trading_days():
+        today = datetime.now(IST)
+        while today.weekday() >= 5:
+            today = today - timedelta(days=1)
+        ltp_day = today.strftime("%Y-%m-%d")
+        pd_day = get_previous_trading_day(ltp_day)
+        print(f"✅ FINAL -> LTP={ltp_day} (AAJ) | PD={pd_day} (KAL BAND TAR PARVA)")
+        return ltp_day, pd_day
+
+    final_ltp_day, final_pd_day = find_real_trading_days()
 
     with ThreadPoolExecutor(max_workers=10) as ex:
         for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), all_keys):
@@ -344,7 +334,7 @@ def run_once():
                 instrument_data[k]["prev_close"]=float(d.iloc[0]["close"]) if len(d)>0 else 0
 
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for k,candles in ex.map(lambda kk: get_candle(kk, pd_day, pd_day), all_keys):
+        for k,candles in ex.map(lambda kk: get_candle(kk, final_pd_day, final_pd_day), all_keys):
             if candles:
                 instrument_data[k]["pdh"]=float(candles[0][2]); instrument_data[k]["pdl"]=float(candles[0][3])
                 instrument_data[k]["prev_vol"]=int(candles[0][5])
@@ -356,7 +346,7 @@ def run_once():
     rem = [k for k,v in instrument_data.items() if v["ltp"]==0]
     if rem:
         with ThreadPoolExecutor(max_workers=10) as ex:
-            for k,candles in ex.map(lambda kk: get_candle(kk, ltp_day, ltp_day), rem):
+            for k,candles in ex.map(lambda kk: get_candle(kk, final_ltp_day, final_ltp_day), rem):
                 if candles: instrument_data[k]["ltp"]=float(candles[0][4]); instrument_data[k]["vol"]=int(candles[0][5])
 
     for k,v in instrument_data.items():
@@ -379,19 +369,17 @@ def run_once():
     return instrument_data, all_keys, sh, sheet, breakout_sheet
 
 if __name__ == "__main__":
-    print("V73 FIXED V2 READY - Syntax Fixed")
-    send_telegram("✅ <b>Script Started FIXED V2 - READY</b>\n📅 MON-FRI Auto Run\n⏰ 9 AM to 3:40 PM IST\n🔔 BREAKOUT/BREAKDOWN Alert ON\n🎨 Dark Green + Dark Red\n🔄 WebSocket + REST Fallback + Smooth No Blink")
+    print("V80 READY - WORKING + PD FIX")
+    send_telegram("✅ <b>V80 READY - WORKING LIVE + PD FIX</b>\nKal band asel tar Parva")
     while True:
         try:
             wait_until_market()
             instrument_data, all_keys, sh, sheet, breakout_sheet = run_once()
-            print("🔴 LIVE STARTED - MON-FRI 9 AM to 3:40 PM + TELEGRAM + REST FALLBACK")
-            
-            # State using dict to avoid nonlocal
+            print("🔴 LIVE STARTED - MON-FRI 9 AM to 3:45 PM + TELEGRAM + REST FALLBACK")
+
             state = {"ws_connected": False, "pending": {}, "streamer": None}
             lock = threading.Lock()
-            
-            # Try WebSocket in thread
+
             def start_websocket_thread():
                 try:
                     configuration = upstox_client.Configuration()
@@ -404,7 +392,7 @@ if __name__ == "__main__":
                     except:
                         streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=streamer_keys, mode="ltpc")
                     state["streamer"] = streamer
-                    
+
                     def on_message(msg):
                         state["ws_connected"] = True
                         for ikey, feed in msg.get("feeds",{}).items():
@@ -417,23 +405,21 @@ if __name__ == "__main__":
                                     if "marketFF" in ff: ltp=ff["marketFF"].get("ltpc",{}).get("ltp")
                                     elif "indexFF" in ff: ltp=ff["indexFF"].get("ltpc",{}).get("ltp")
                                 with lock:
-                                    if ltp: 
+                                    if ltp:
                                         instrument_data[ikey]["ltp"]=float(ltp)
                                         state["pending"][ikey]=float(ltp)
                             except: pass
-                    
+
                     def on_open():
                         state["ws_connected"] = True
                         print("✅ WebSocket OPEN - Live via WebSocket")
-                    
                     def on_error(e):
                         state["ws_connected"] = False
-                        print(f"⚠️ WS Err {e} - Switching to REST fallback")
-                    
+                        print(f"⚠ WS Err {e} - Switching to REST fallback")
                     def on_close(code, reason):
                         state["ws_connected"] = False
                         print(f"WS Closed {code} - REST fallback active")
-                    
+
                     streamer.on("open", on_open)
                     streamer.on("message", on_message)
                     streamer.on("error", on_error)
@@ -446,25 +432,25 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"WebSocket thread failed {e} - REST only will work")
                     state["ws_connected"] = False
-            
+
             ws_thread = threading.Thread(target=start_websocket_thread, daemon=True)
             ws_thread.start()
-            
+
             last=time.time()
             last_rest_fetch = time.time()
             rest_count = 0
-            
+
             while is_market_time():
                 time.sleep(1)
                 now = time.time()
-                
+
                 if now - last >= 5:
                     with lock:
                         for k, ltp in list(state["pending"].items()):
                             pc=instrument_data[k]["prev_close"]
                             instrument_data[k]["change"]=(ltp-pc)/pc*100 if pc>0 else 0
                         state["pending"].clear()
-                        
+
                         if not state["ws_connected"] or (now - last_rest_fetch >= 10):
                             print(f"🔄 REST Fallback fetching LTP... (WS Connected: {state['ws_connected']})")
                             try:
@@ -474,7 +460,7 @@ if __name__ == "__main__":
                                 rest_count += 1
                             except Exception as e:
                                 print(f"REST err {e}")
-                        
+
                         try:
                             smooth_update_sheet(sheet, build_sorted(instrument_data))
                             try:
@@ -486,11 +472,11 @@ if __name__ == "__main__":
                         except Exception as e:
                             print(f"Update err {e}")
                     last = now
-            
+
             print("Market closed or Weekend - Going to sleep till next MON-FRI 9 AM")
             send_telegram(f"😴 <b>Market Closed</b>\n📅 {datetime.now(IST).strftime('%A %d %b %H:%M IST')}\nNext run: Next MON-FRI 9 AM\nREST Fallbacks: {rest_count}")
             time.sleep(60)
-            
+
         except Exception as e:
             print(f"❌ Error: {e}")
             import traceback; traceback.print_exc()
