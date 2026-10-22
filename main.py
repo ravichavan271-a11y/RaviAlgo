@@ -80,31 +80,51 @@ def get_token_automatic():
     except Exception as e: print(f"B1 fetch error: {e}")
     return None
 
-file_status = {"upstock4": {"running": False, "last_start": "", "error": "", "count": 0}}
+def pick_script():
+    base=os.path.dirname(os.path.abspath(__file__))
+    for n in ("Upstock5.py","Upstock4.py"):
+        if os.path.exists(os.path.join(base,n)): return os.path.join(base,n)
+    return None
+
+file_status = {"script": {"name": "", "running": False, "last_start": "", "error": "", "count": 0}}
 
 def run_upstox():
+    import subprocess
+    proc=None
     while True:
-        if not is_market_open():
-            file_status["upstock4"]["running"]=False
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {get_market_status_msg()} - Sleep 60s")
-            time.sleep(60)
-            continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - 9:00-3:45")
-            file_status["upstock4"]["running"]=True
-            file_status["upstock4"]["last_start"]=datetime.now(IST).isoformat()
-            file_status["upstock4"]["count"]+=1
-            tok = get_token_automatic()
+            if not is_market_open():
+                if proc and proc.poll() is None:
+                    print("Market closed 3:45 - stopping script")
+                    proc.terminate()
+                    try: proc.wait(timeout=15)
+                    except Exception: proc.kill()
+                proc=None
+                file_status["script"]["running"]=False
+                time.sleep(30)
+                continue
+            if proc and proc.poll() is None:
+                time.sleep(15)
+                continue
+            script=pick_script()
+            if not script:
+                file_status["script"]["error"]="No Upstock5.py/Upstock4.py found"
+                time.sleep(60)
+                continue
+            tok=get_token_automatic()
             if not tok:
                 print("Waiting 60s for token...")
                 time.sleep(60)
                 continue
-            if 'Upstock4' in sys.modules: del sys.modules['Upstock4']
-            import Upstock4
+            env=dict(os.environ, UPSTOX_ACCESS_TOKEN=tok, PYTHONUNBUFFERED="1")
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting {os.path.basename(script)}")
+            proc=subprocess.Popen([sys.executable, script], env=env, cwd=os.path.dirname(script))
+            file_status["script"].update(name=os.path.basename(script), running=True, last_start=datetime.now(IST).isoformat(), error="")
+            file_status["script"]["count"]+=1
+            time.sleep(15)
         except Exception as e:
-            import traceback
-            print(f"Upstock4 CRASHED: {e}\n{traceback.format_exc()[:500]}")
-            file_status["upstock4"]["running"]=False
+            file_status["script"]["error"]=str(e)
+            print(f"runner error: {e}")
             time.sleep(10)
 
 def auto_token_watcher():
@@ -157,7 +177,7 @@ def upstox_callback():
         else: return f"Error: {token_data}"
     except Exception as e: return f"Error: {e}"
 
-print("=== STARTING FIXED - ONLY UPSTOCK4 ===")
+print("=== STARTING FIXED - UPSTOCK5/4 RUNNER ===")
 
 def delayed_start():
     time.sleep(10)
