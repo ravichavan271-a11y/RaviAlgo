@@ -1,0 +1,65 @@
+name: Run option_bot on free GitHub Actions runners
+
+on:
+  schedule:
+    - cron: "21 3 * * 1-5" # 08:51 IST, Mon-Fri
+    - cron: "10 9 * * 1-5" # 14:40 IST, Mon-Fri
+
+permissions:
+  contents: read
+
+jobs:
+  morning-session:
+    if: github.event.schedule == '21 3 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TOKEN_SPREADSHEET_NAME: Dsheet
+      OPTION_SPREADSHEET_NAME: option Dsheet
+      SESSION_SCRIPTS: option_bot.py
+      SESSION_START: "09:00"
+      SESSION_STOP: "14:50"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Google credential secret
+        run: |
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Add GOOGLE_SERVICE_ACCOUNT_JSON in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+      - name: Install option bot dependencies
+        run: python -m pip install -r requirements-option-bot.txt
+      - name: Run option bot until 2:50 PM IST
+        run: python -u run_session.py
+
+  afternoon-session:
+    if: github.event.schedule == '10 9 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TOKEN_SPREADSHEET_NAME: Dsheet
+      OPTION_SPREADSHEET_NAME: option Dsheet
+      SESSION_SCRIPTS: option_bot.py
+      SESSION_START: "14:51"
+      SESSION_STOP: "15:45"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Google credential secret
+        run: |
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Add GOOGLE_SERVICE_ACCOUNT_JSON in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+      - name: Install option bot dependencies
+        run: python -m pip install -r requirements-option-bot.txt
+      - name: Run option bot until 3:45 PM IST
+        run: python -u run_session.py
+

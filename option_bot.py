@@ -1,4 +1,4 @@
-import gzip, io, time, threading, os, re
+import gzip, io, time, threading, os, re, json
 from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -8,19 +8,45 @@ from concurrent.futures import ThreadPoolExecutor
 
 print("V42 - OPEN BASED ATM + OCT EXPIRY ROLLOVER FIX")
 
-UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_TOKEN", "").strip()
-if not UPSTOX_ACCESS_TOKEN:
-    try:
-        with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as f:
-            UPSTOX_ACCESS_TOKEN = f.read().strip()
-    except: pass
+SPREADSHEET_NAME = os.getenv("OPTION_SPREADSHEET_NAME", "option Dsheet")
+TOKEN_SPREADSHEET_NAME = os.getenv("TOKEN_SPREADSHEET_NAME", "Dsheet")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+GOOGLE_SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+gc = None
 
+def get_google_client():
+    if SERVICE_ACCOUNT_JSON:
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(SERVICE_ACCOUNT_JSON), GOOGLE_SCOPE)
+    else:
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json"), GOOGLE_SCOPE)
+    return gspread.authorize(credentials)
+
+def get_upstox_token():
+    token = (os.getenv("UPSTOX_ACCESS_TOKEN", "") or os.getenv("UPSTOX_TOKEN", "")).strip()
+    if len(token) >= 50:
+        return token
+    try:
+        global gc
+        gc = gc or get_google_client()
+        token = str(gc.open(TOKEN_SPREADSHEET_NAME).sheet1.cell(1, 2).value or "").strip()
+        if len(token) >= 50:
+            return token
+    except Exception as exc:
+        print(f"TOKEN SHEET ERR {exc}")
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as token_file:
+            token = token_file.read().strip()
+        if len(token) >= 50:
+            return token
+    except OSError:
+        pass
+    return ""
+
+UPSTOX_ACCESS_TOKEN = get_upstox_token()
 print(f"TOKEN LEN: {len(UPSTOX_ACCESS_TOKEN)}")
 if len(UPSTOX_ACCESS_TOKEN) < 50:
-    print("TOKEN EMPTY"); exit()
-
-SPREADSHEET_NAME = "option Dsheet"
-SERVICE_ACCOUNT_FILE = r"C:\Users\Admin\Desktop\Angel\service_account.json"
+    print("TOKEN EMPTY or expired; update Dsheet cell B1 before running.")
+    raise SystemExit(1)
 
 def parse_date(val):
     if not val: return ""
@@ -47,8 +73,7 @@ def find_weekly_range_top3(sh):
     except: return "", ""
 
 try:
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+    gc = gc or get_google_client()
     sh = gc.open(SPREADSHEET_NAME)
     sheet = sh.sheet1
     weekly_from, weekly_to = find_weekly_range_top3(sh)
@@ -57,7 +82,7 @@ try:
         weekly_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     print(f"Weekly {weekly_from} to {weekly_to}")
 except Exception as e:
-    print(f"SHEET ERR {e}"); exit()
+    print(f"SHEET ERR {e}"); raise SystemExit(1)
 
 RAW_STRUCTURE = {
     "NIFTY 50": ["BHARTIARTL","LT","RELIANCE"],
@@ -349,7 +374,7 @@ configuration = upstox_client.Configuration(); configuration.access_token = UPST
 api_client = upstox_client.ApiClient(configuration)
 all_keys = index_keys + option_keys
 if not all_keys:
-    print("NO KEYS"); time.sleep(10); exit()
+    print("NO KEYS"); raise SystemExit(1)
 
 streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
 pending={}; lock=threading.Lock()
@@ -417,3 +442,4 @@ def updater():
 
 threading.Thread(target=updater, daemon=True).start()
 while True: time.sleep(1)
+

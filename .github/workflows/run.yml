@@ -1,29 +1,73 @@
-name: Auto Run Trading Script
+name: Keep Render Free service awake during market hours
 
 on:
   schedule:
-    # सोमवार ते शुक्रवार सकाळी 9:01 IST (03:31 UTC)
-    - cron: '31 3 * * 1-5'
-  workflow_dispatch:
+    - cron: "21 3 * * 1-5" # 08:51 IST, Mon-Fri
+    - cron: "10 9 * * 1-5" # 14:40 IST, Mon-Fri
+
+permissions:
+  contents: read
 
 jobs:
-  run-script:
+  morning-to-afternoon:
+    if: github.event.schedule == '21 3 * * 1-5'
     runs-on: ubuntu-latest
-
+    timeout-minutes: 360
+    env:
+      RENDER_URL: https://ravialgo.onrender.com
+      STOP_HOUR: "14"
+      STOP_MINUTE: "50"
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
+      - name: Ping Render every five minutes until 2:50 PM IST
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python - <<'PY'
+          import os, time
+          from datetime import datetime
+          from urllib.request import urlopen
+          from zoneinfo import ZoneInfo
 
-      - name: Run Script
-        timeout-minutes: 360
-        run: python main.py
+          ist = ZoneInfo("Asia/Kolkata")
+          url = os.environ["RENDER_URL"].rstrip("/") + "/ping"
+          stop = datetime.now(ist).replace(
+              hour=int(os.environ["STOP_HOUR"]),
+              minute=int(os.environ["STOP_MINUTE"]), second=0, microsecond=0)
+          while datetime.now(ist) < stop:
+              try:
+                  with urlopen(url, timeout=90) as response:
+                      print(f"{datetime.now(ist):%H:%M:%S IST}: Render ping {response.status}", flush=True)
+              except Exception as exc:
+                  print(f"{datetime.now(ist):%H:%M:%S IST}: ping failed: {exc}", flush=True)
+              time.sleep(300)
+          PY
+
+  afternoon-to-close:
+    if: github.event.schedule == '10 9 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RENDER_URL: https://ravialgo.onrender.com
+      STOP_HOUR: "15"
+      STOP_MINUTE: "50"
+    steps:
+      - name: Ping Render every five minutes until 3:50 PM IST
+        run: |
+          python - <<'PY'
+          import os, time
+          from datetime import datetime
+          from urllib.request import urlopen
+          from zoneinfo import ZoneInfo
+
+          ist = ZoneInfo("Asia/Kolkata")
+          url = os.environ["RENDER_URL"].rstrip("/") + "/ping"
+          stop = datetime.now(ist).replace(
+              hour=int(os.environ["STOP_HOUR"]),
+              minute=int(os.environ["STOP_MINUTE"]), second=0, microsecond=0)
+          while datetime.now(ist) < stop:
+              try:
+                  with urlopen(url, timeout=90) as response:
+                      print(f"{datetime.now(ist):%H:%M:%S IST}: Render ping {response.status}", flush=True)
+              except Exception as exc:
+                  print(f"{datetime.now(ist):%H:%M:%S IST}: ping failed: {exc}", flush=True)
+              time.sleep(300)
+          PY
+
