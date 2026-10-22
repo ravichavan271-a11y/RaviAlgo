@@ -55,7 +55,7 @@ def is_market_time():
     now = datetime.now(IST)
     if now.weekday() >= 5: return False
     if 9 <= now.hour < 15: return True
-    if now.hour == 15 and now.minute <= 40: return True
+    if now.hour == 15 and now.minute <= 45: return True
     return False
 
 def wait_until_market():
