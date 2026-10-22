@@ -80,52 +80,45 @@ def get_token_automatic():
     except Exception as e: print(f"B1 fetch error: {e}")
     return None
 
-def pick_script():
-    base=os.path.dirname(os.path.abspath(__file__))
-    for n in ("Upstock5.py","Upstock4.py"):
-        if os.path.exists(os.path.join(base,n)): return os.path.join(base,n)
-    return None
+SCRIPTS=["Upstock4.py","option_bot.py"]
 
-file_status = {"script": {"name": "", "running": False, "last_start": "", "error": "", "count": 0}}
+file_status = {n: {"running": False, "last_start": "", "error": "", "count": 0} for n in SCRIPTS}
 
 def run_upstox():
     import subprocess
-    proc=None
+    base=os.path.dirname(os.path.abspath(__file__))
+    procs={}; last_try={}
     while True:
         try:
-            if not is_market_open():
-                if proc and proc.poll() is None:
-                    print("Market closed 3:45 - stopping script")
-                    proc.terminate()
-                    try: proc.wait(timeout=15)
-                    except Exception: proc.kill()
-                proc=None
-                file_status["script"]["running"]=False
-                time.sleep(30)
-                continue
-            if proc and proc.poll() is None:
-                time.sleep(15)
-                continue
-            script=pick_script()
-            if not script:
-                file_status["script"]["error"]="No Upstock5.py/Upstock4.py found"
-                time.sleep(60)
-                continue
-            tok=get_token_automatic()
-            if not tok:
-                print("Waiting 60s for token...")
-                time.sleep(60)
-                continue
-            env=dict(os.environ, UPSTOX_ACCESS_TOKEN=tok, PYTHONUNBUFFERED="1")
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting {os.path.basename(script)}")
-            proc=subprocess.Popen([sys.executable, script], env=env, cwd=os.path.dirname(script))
-            file_status["script"].update(name=os.path.basename(script), running=True, last_start=datetime.now(IST).isoformat(), error="")
-            file_status["script"]["count"]+=1
-            time.sleep(15)
-        except Exception as e:
-            file_status["script"]["error"]=str(e)
-            print(f"runner error: {e}")
+            market=is_market_open()
+            for name in SCRIPTS:
+                p=procs.get(name); alive=bool(p and p.poll() is None)
+                if not market:
+                    if alive:
+                        print(f"Market closed 3:45 - stopping {name}")
+                        p.terminate()
+                        try: p.wait(timeout=15)
+                        except Exception: p.kill()
+                    procs.pop(name,None); file_status[name]["running"]=False
+                    continue
+                file_status[name]["running"]=alive
+                if alive: continue
+                path=os.path.join(base,name)
+                if not os.path.exists(path):
+                    file_status[name]["error"]="file missing"; continue
+                if time.time()-last_try.get(name,0)<60: continue
+                last_try[name]=time.time()
+                tok=get_token_automatic()
+                if not tok:
+                    print("Waiting for token..."); continue
+                env=dict(os.environ, UPSTOX_ACCESS_TOKEN=tok, UPSTOX_TOKEN=tok, PYTHONUNBUFFERED="1")
+                print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting {name}")
+                procs[name]=subprocess.Popen([sys.executable, path], env=env, cwd=base)
+                file_status[name].update(running=True, last_start=datetime.now(IST).isoformat(), error="")
+                file_status[name]["count"]+=1
             time.sleep(10)
+        except Exception as e:
+            print(f"runner error: {e}"); time.sleep(10)
 
 def auto_token_watcher():
     while True:

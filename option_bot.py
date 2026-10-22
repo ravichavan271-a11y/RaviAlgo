@@ -1,5 +1,6 @@
-import gzip, io, time, threading, os, re
+import gzip, io, time, threading, os, re, sys, json
 from datetime import datetime, timedelta
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
@@ -8,19 +9,39 @@ from concurrent.futures import ThreadPoolExecutor
 
 print("V42 - OPEN BASED ATM + OCT EXPIRY ROLLOVER FIX")
 
-UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_TOKEN", "").strip()
+IST = pytz.timezone('Asia/Kolkata')
+
+def is_market_time():
+    now = datetime.now(IST)
+    if now.weekday() >= 5: return False
+    if 9 <= now.hour < 15: return True
+    if now.hour == 15 and now.minute < 45: return True
+    return False
+
+UPSTOX_ACCESS_TOKEN = (os.getenv("UPSTOX_TOKEN", "") or os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
 if not UPSTOX_ACCESS_TOKEN:
     try:
-        with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as f:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "token.txt"), "r") as f:
             UPSTOX_ACCESS_TOKEN = f.read().strip()
     except: pass
 
 print(f"TOKEN LEN: {len(UPSTOX_ACCESS_TOKEN)}")
 if len(UPSTOX_ACCESS_TOKEN) < 50:
-    print("TOKEN EMPTY"); exit()
+    print("TOKEN EMPTY"); sys.exit(1)
 
-SPREADSHEET_NAME = "option Dsheet"
-SERVICE_ACCOUNT_FILE = r"C:\Users\Admin\Desktop\Angel\service_account.json"
+SPREADSHEET_NAME = os.environ.get("OPTION_SPREADSHEET_NAME", "option Dsheet")
+
+def get_gspread_client():
+    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+    if env_json:
+        try: return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope))
+        except: pass
+    for p in [os.environ.get("SERVICE_ACCOUNT_FILE", ""), "service_account.json", "./service_account.json", "/app/service_account.json", "/etc/secrets/service_account.json"]:
+        if p and os.path.exists(p):
+            try: return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(p, scope))
+            except: pass
+    raise Exception("GOOGLE_SERVICE_ACCOUNT_JSON missing")
 
 def parse_date(val):
     if not val: return ""
@@ -47,17 +68,16 @@ def find_weekly_range_top3(sh):
     except: return "", ""
 
 try:
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope))
+    gc = get_gspread_client()
     sh = gc.open(SPREADSHEET_NAME)
     sheet = sh.sheet1
     weekly_from, weekly_to = find_weekly_range_top3(sh)
     if not weekly_from or not weekly_to:
-        weekly_to = datetime.now().strftime("%Y-%m-%d")
-        weekly_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        weekly_to = datetime.now(IST).strftime("%Y-%m-%d")
+        weekly_from = (datetime.now(IST) - timedelta(days=7)).strftime("%Y-%m-%d")
     print(f"Weekly {weekly_from} to {weekly_to}")
 except Exception as e:
-    print(f"SHEET ERR {e}"); exit()
+    print(f"SHEET ERR {e}"); sys.exit(1)
 
 RAW_STRUCTURE = {
     "NIFTY 50": ["BHARTIARTL","LT","RELIANCE"],
@@ -198,7 +218,7 @@ print("Fetching LTP...")
 fetch_ltp(index_keys, index_data)
 fetch_ltp(stock_keys, stock_underlying_data)
 
-today = datetime.now().strftime("%Y-%m-%d")
+today = datetime.now(IST).strftime("%Y-%m-%d")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, today, today), stock_keys):
         if candles: stock_underlying_data[k]["open"]=float(candles[0][1])
@@ -207,7 +227,7 @@ for k,v in stock_underlying_data.items():
 
 pd_day=None
 for i in range(1,8):
-    d=(datetime.now()-timedelta(days=i)).strftime("%Y-%m-%d")
+    d=(datetime.now(IST)-timedelta(days=i)).strftime("%Y-%m-%d")
     if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
 
 print(f"PD Day: {pd_day}")
@@ -237,7 +257,7 @@ print("Building Options ATM - OPEN BASED + OCT FIX...")
 opt_df = df[(df[exchange_col]=="NSE_FO")].copy() if exchange_col else df[df[instrument_key_col].str.contains('NSE_FO', na=False)].copy()
 opt_df['expiry_dt'] = pd.to_datetime(opt_df[expiry_col], errors='coerce')
 opt_df = opt_df.dropna(subset=['expiry_dt'])
-yesterday = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+yesterday = pd.Timestamp.now(tz=IST).tz_localize(None).normalize() - pd.Timedelta(days=1)
 opt_df = opt_df[opt_df['expiry_dt'] >= yesterday]
 print(f"Available expiries: {sorted(opt_df['expiry_dt'].dt.strftime('%d-%b-%Y').unique())[:5]}")
 
@@ -341,7 +361,7 @@ try: sheet.batch_clear(["A4:Z5000"])
 except: pass
 final_rows = build_rows()
 sheet.update(values=final_rows, range_name="A4")
-sheet.update(values=[[datetime.now().strftime("%H:%M:%S")]], range_name="C3")
+sheet.update(values=[[datetime.now(IST).strftime("%H:%M:%S")]], range_name="C3")
 print(f"DONE - Index {len(index_data)} Option {len(option_data)}")
 
 import upstox_client
@@ -349,7 +369,7 @@ configuration = upstox_client.Configuration(); configuration.access_token = UPST
 api_client = upstox_client.ApiClient(configuration)
 all_keys = index_keys + option_keys
 if not all_keys:
-    print("NO KEYS"); time.sleep(10); exit()
+    print("NO KEYS"); time.sleep(10); sys.exit(1)
 
 streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
 pending={}; lock=threading.Lock()
@@ -368,7 +388,7 @@ def on_message(msg):
         except: pass
 
 def on_open():
-    print(f"LIVE STARTED - {len(all_keys)} keys OCT {datetime.now()}")
+    print(f"LIVE STARTED - {len(all_keys)} keys OCT {datetime.now(IST)}")
 
 streamer.on("open", on_open); streamer.on("message", on_message); streamer.connect()
 
@@ -395,7 +415,7 @@ def updater():
                     fetch_ltp(index_keys, index_data)
                 except: pass
             batch=[]
-            batch.append({"range": f"C3", "values": [[datetime.now().strftime("%H:%M:%S")]]})
+            batch.append({"range": f"C3", "values": [[datetime.now(IST).strftime("%H:%M:%S")]]})
             for sym, rnum in row_map_index.items():
                 for k,v in index_data.items():
                     if v["symbol"]==sym and v["ltp"]>0:
@@ -416,4 +436,6 @@ def updater():
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
-while True: time.sleep(1)
+while is_market_time(): time.sleep(1)
+print("Market closed 3:45 - option_bot exiting")
+sys.exit(0)
