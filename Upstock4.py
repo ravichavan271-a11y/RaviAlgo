@@ -8,12 +8,12 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import upstox_client
 
-print("FINAL V73 FIXED V2 - SyntaxError Fixed - WEBSOCKET + REST FALLBACK - NO BLINK")
+print("FINAL V80 - WORKING LIVE + PD FIX")
 
 IST = pytz.timezone('Asia/Kolkata')
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "Dsheet")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8255515384:AAEREJpnfiMkr3vOjBhgRBgCTZNUbPcpyHI")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7602442830")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 ALERTED = set()
 
@@ -22,8 +22,7 @@ def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200: print(f"✅ Telegram Sent")
+        requests.post(url, json=payload, timeout=10)
     except: pass
 
 def get_gspread_client():
@@ -51,7 +50,6 @@ def get_token():
     raise Exception("UPSTOX_ACCESS_TOKEN missing")
 
 UPSTOX_ACCESS_TOKEN = get_token()
-print(f"Token OK {UPSTOX_ACCESS_TOKEN[:20]}...")
 
 def is_market_time():
     now = datetime.now(IST)
@@ -63,30 +61,18 @@ def is_market_time():
 def wait_until_market():
     while True:
         now = datetime.now(IST)
-        day_name = now.strftime('%A')
         if now.weekday() >= 5:
             next_monday = now + timedelta(days=(7 - now.weekday()))
             next_monday = next_monday.replace(hour=9, minute=0, second=0, microsecond=0)
             sleep_sec = (next_monday - now).total_seconds()
-            print(f"📅 WEEKEND {day_name} - Next MONDAY {next_monday.strftime('%d %b %H:%M IST')} - Sleeping {int(sleep_sec/3600)}h")
+            print(f"📅 WEEKEND {now.strftime('%A')} - Sleeping {int(sleep_sec/3600)}h")
             time.sleep(min(sleep_sec, 3600))
             continue
         if is_market_time():
-            print(f"✅ {day_name} Market Time {now.strftime('%H:%M:%S IST')} - Starting...")
+            print(f"✅ {now.strftime('%A')} Market Time {now.strftime('%H:%M:%S IST')} - Starting...")
             ALERTED.clear()
             return True
-        if now.hour < 9:
-            next_run = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            sleep_sec = (next_run - now).total_seconds()
-            print(f"⏰ {day_name} {now.strftime('%H:%M')} - Market 9 AM - Sleeping {int(sleep_sec/60)} min...")
-            time.sleep(min(sleep_sec, 300))
-        else:
-            next_run = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            while next_run.weekday() >= 5:
-                next_run = next_run + timedelta(days=1)
-            sleep_sec = (next_run - now).total_seconds()
-            print(f"⏰ Market closed {now.strftime('%H:%M')} - Next run {next_run.strftime('%A %d %b %H:%M')} - Sleeping {int(sleep_sec/60)} min...")
-            time.sleep(min(sleep_sec, 300))
+        time.sleep(60)
 
 print("Downloading instruments...")
 r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
@@ -164,11 +150,6 @@ def build_sorted(instrument_data):
         dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
         st=get_status(it)
         if st and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-        key = f"{it['symbol']}_{st}"
-        if st in ["BREAKOUT","BREAKDOWN"] and key not in ALERTED:
-            ALERTED.add(key)
-            msg = f"🚀 <b>{it['symbol']} {st}</b>\n📊 INDEX\n💰 LTP: {it['ltp']}\n📈 Week {'High' if st=='BREAKOUT' else 'Low'}: {it['wh'] if st=='BREAKOUT' else it['wl']}\n⏰ {it['break_time']}\n📅 {datetime.now(IST).strftime('%d %b %H:%M:%S')}"
-            send_telegram(msg)
         rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",st,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
     rows.append([])
     for sec_name in STRUCTURE.keys():
@@ -178,12 +159,6 @@ def build_sorted(instrument_data):
             dist=it["ltp"]/it["wh"]*100 if it["wh"]>0 else 0; volx=it["vol"]/it["prev_vol"] if it["prev_vol"]>0 else 0
             st=get_status(it)
             if st and not it["break_time"]: it["break_time"]=datetime.now(IST).strftime("%H:%M:%S")
-            key = f"{it['symbol']}_{st}"
-            if st in ["BREAKOUT","BREAKDOWN"] and key not in ALERTED:
-                ALERTED.add(key)
-                emoji = "🚀" if st=="BREAKOUT" else "🔻"
-                msg = f"{emoji} <b>{it['symbol']} {st}</b>\n📊 {sec_name}\n💰 LTP: {it['ltp']} ({it['change']:.2f}%)\n📈 Week {'High' if st=='BREAKOUT' else 'Low'}: {it['wh'] if st=='BREAKOUT' else it['wl']}\n📦 VOL: {volx:.1f}X\n⏰ {it['break_time']}\n📅 {datetime.now(IST).strftime('%d %b %H:%M:%S')}"
-                send_telegram(msg)
             rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",it["vol"],it["prev_vol"],f"{volx:.1f}X",f"{dist:.1f}%",st,it["break_time"],datetime.now(IST).strftime("%H:%M:%S")])
         rows.append([])
     return rows
@@ -320,20 +295,30 @@ def run_once():
     weekly_to = parse_date(b3_val)
     print(f"Weekly {weekly_from} to {weekly_to}")
 
-    def get_today_ltp_day_inner():
-        now = datetime.now(IST)
-        if now.weekday() < 5: return now.strftime("%Y-%m-%d")
-        d=now
-        while True:
-            d=d-timedelta(days=1)
-            if d.weekday()<5: return d.strftime("%Y-%m-%d")
-    def get_pd_day_inner(s):
-        d = datetime.strptime(s, "%Y-%m-%d")
-        while True:
+    # === V80 PD FIX - AAJ + KAL BAND TAR PARVA ===
+    def get_previous_trading_day(from_date_str):
+        sample_key = mp.get("NIFTY 50")
+        d = datetime.strptime(from_date_str, "%Y-%m-%d")
+        for _ in range(15):
             d = d - timedelta(days=1)
-            if d.weekday() < 5: return d.strftime("%Y-%m-%d")
-    ltp_day = get_today_ltp_day_inner()
-    pd_day = get_pd_day_inner(ltp_day)
+            if d.weekday() >= 5: continue
+            s = d.strftime("%Y-%m-%d")
+            _, candles = get_candle(sample_key, s, s)
+            if candles:
+                return s
+            print(f"❌ {s} sutti, parva check...")
+        return from_date_str
+
+    def find_real_trading_days():
+        today = datetime.now(IST)
+        while today.weekday() >= 5:
+            today = today - timedelta(days=1)
+        ltp_day = today.strftime("%Y-%m-%d")
+        pd_day = get_previous_trading_day(ltp_day)
+        print(f"✅ FINAL -> LTP={ltp_day} (AAJ) | PD={pd_day} (KAL BAND TAR PARVA)")
+        return ltp_day, pd_day
+
+    final_ltp_day, final_pd_day = find_real_trading_days()
 
     with ThreadPoolExecutor(max_workers=10) as ex:
         for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), all_keys):
@@ -344,7 +329,7 @@ def run_once():
                 instrument_data[k]["prev_close"]=float(d.iloc[0]["close"]) if len(d)>0 else 0
 
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for k,candles in ex.map(lambda kk: get_candle(kk, pd_day, pd_day), all_keys):
+        for k,candles in ex.map(lambda kk: get_candle(kk, final_pd_day, final_pd_day), all_keys):
             if candles:
                 instrument_data[k]["pdh"]=float(candles[0][2]); instrument_data[k]["pdl"]=float(candles[0][3])
                 instrument_data[k]["prev_vol"]=int(candles[0][5])
@@ -356,7 +341,7 @@ def run_once():
     rem = [k for k,v in instrument_data.items() if v["ltp"]==0]
     if rem:
         with ThreadPoolExecutor(max_workers=10) as ex:
-            for k,candles in ex.map(lambda kk: get_candle(kk, ltp_day, ltp_day), rem):
+            for k,candles in ex.map(lambda kk: get_candle(kk, final_ltp_day, final_ltp_day), rem):
                 if candles: instrument_data[k]["ltp"]=float(candles[0][4]); instrument_data[k]["vol"]=int(candles[0][5])
 
     for k,v in instrument_data.items():
@@ -378,20 +363,18 @@ def run_once():
     print(f"✅ Sheet Updated {datetime.now(IST).strftime('%H:%M:%S')} - SMOOTH No Blink")
     return instrument_data, all_keys, sh, sheet, breakout_sheet
 
-if __name__ == "__main__":
-    print("V73 FIXED V2 READY - Syntax Fixed")
-    send_telegram("✅ <b>Script Started FIXED V2 - READY</b>\n📅 MON-FRI Auto Run\n⏰ 9 AM to 3:40 PM IST\n🔔 BREAKOUT/BREAKDOWN Alert ON\n🎨 Dark Green + Dark Red\n🔄 WebSocket + REST Fallback + Smooth No Blink")
+if __name__ == "__main__" or __name__ == "Upstock4":
+    print("V80 READY - WORKING + PD FIX")
+    send_telegram("✅ <b>V80 READY - WORKING LIVE + PD FIX</b>\nKal band asel tar Parva")
     while True:
         try:
             wait_until_market()
             instrument_data, all_keys, sh, sheet, breakout_sheet = run_once()
             print("🔴 LIVE STARTED - MON-FRI 9 AM to 3:40 PM + TELEGRAM + REST FALLBACK")
             
-            # State using dict to avoid nonlocal
             state = {"ws_connected": False, "pending": {}, "streamer": None}
             lock = threading.Lock()
             
-            # Try WebSocket in thread
             def start_websocket_thread():
                 try:
                     configuration = upstox_client.Configuration()
@@ -425,11 +408,9 @@ if __name__ == "__main__":
                     def on_open():
                         state["ws_connected"] = True
                         print("✅ WebSocket OPEN - Live via WebSocket")
-                    
                     def on_error(e):
                         state["ws_connected"] = False
-                        print(f"⚠️ WS Err {e} - Switching to REST fallback")
-                    
+                        print(f"⚠ WS Err {e} - Switching to REST fallback")
                     def on_close(code, reason):
                         state["ws_connected"] = False
                         print(f"WS Closed {code} - REST fallback active")
