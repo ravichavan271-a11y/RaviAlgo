@@ -1,4 +1,4 @@
-import os, json, threading, time, logging, sys
+import os, json, threading, time, logging, sys, subprocess
 from datetime import datetime
 import pytz, requests
 from flask import Flask, jsonify, request, redirect
@@ -80,7 +80,7 @@ def get_token_automatic():
     except Exception as e: print(f"B1 fetch error: {e}")
     return None
 
-file_status = {"upstock5": {"running": False, "last_start": "", "error": "", "count": 0}}
+file_status = {"upstock5": {"running": False, "last_start": "", "error": "", "count": 0}, "option_bot": {"running": False, "last_start": "", "error": "", "count": 0}}
 
 def run_upstox():
     while True:
@@ -106,6 +106,43 @@ def run_upstox():
             print(f"Upstock5 CRASHED: {e}\n{traceback.format_exc()[:500]}")
             file_status["upstock5"]["running"]=False
             time.sleep(10)
+
+def run_option_bot():
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "option_bot.py")
+    while True:
+        if not is_market_open():
+            file_status["option_bot"]["running"] = False
+            time.sleep(60)
+            continue
+        process = None
+        try:
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting option_bot.py - 9:00-3:45")
+            file_status["option_bot"].update({"running": True, "last_start": datetime.now(IST).isoformat(), "error": ""})
+            file_status["option_bot"]["count"] += 1
+            process = subprocess.Popen([sys.executable, "-u", script_path], cwd=os.path.dirname(script_path))
+            while process.poll() is None and is_market_open():
+                time.sleep(5)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            return_code = process.returncode
+            file_status["option_bot"]["running"] = False
+            if return_code not in (0, None):
+                file_status["option_bot"]["error"] = f"option_bot.py exited with code {return_code}"
+                print(file_status["option_bot"]["error"])
+            if is_market_open():
+                time.sleep(60)
+        except Exception as e:
+            file_status["option_bot"]["running"] = False
+            file_status["option_bot"]["error"] = str(e)
+            print(f"option_bot.py failed: {e}")
+            if process and process.poll() is None:
+                process.terminate()
+            time.sleep(60)
 
 def auto_token_watcher():
     while True:
@@ -162,8 +199,9 @@ print("=== STARTING FIXED - ONLY UPSTOCK4 ===")
 def delayed_start():
     time.sleep(10)
     threading.Thread(target=run_upstox,daemon=True).start()
+    threading.Thread(target=run_option_bot,daemon=True).start()
     threading.Thread(target=auto_token_watcher,daemon=True).start()
-    print("✅ Upstox thread started")
+    print("✅ Upstock5 and option_bot threads started")
 
 threading.Thread(target=delayed_start,daemon=True).start()
 
