@@ -21,25 +21,48 @@ def get_google_client():
         credentials = ServiceAccountCredentials.from_json_keyfile_name(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json"), GOOGLE_SCOPE)
     return gspread.authorize(credentials)
 
+def _is_upstox_token_valid(token):
+    if not token or len(token) < 50:
+        return False
+    try:
+        response = requests.get(
+            "https://api.upstox.com/v2/user/profile",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
 def get_upstox_token():
-    token = (os.getenv("UPSTOX_ACCESS_TOKEN", "") or os.getenv("UPSTOX_TOKEN", "")).strip()
-    if len(token) >= 50:
-        return token
+    # Dsheet is refreshed by the OAuth callback each morning. Check it first so
+    # a stale Render environment token cannot hide the newly approved token.
     try:
         global gc
         gc = gc or get_google_client()
-        token = str(gc.open(TOKEN_SPREADSHEET_NAME).sheet1.cell(1, 2).value or "").strip()
-        if len(token) >= 50:
-            return token
+        sheet_token = str(gc.open(TOKEN_SPREADSHEET_NAME).sheet1.cell(1, 2).value or "").strip()
+        if _is_upstox_token_valid(sheet_token):
+            print("Using the current valid Upstox token from Dsheet.")
+            return sheet_token
+        if sheet_token:
+            print("Dsheet Upstox token is expired or invalid; checking fallback sources.")
     except Exception as exc:
-        print(f"TOKEN SHEET ERR {exc}")
-    try:
-        with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as token_file:
-            token = token_file.read().strip()
-        if len(token) >= 50:
+        print(f"TOKEN SHEET ERR: {type(exc).__name__}")
+
+    for source, token in (
+        ("environment", os.getenv("UPSTOX_ACCESS_TOKEN", "") or os.getenv("UPSTOX_TOKEN", "")),
+        ("token.txt", ""),
+    ):
+        if source == "token.txt":
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as token_file:
+                    token = token_file.read().strip()
+            except OSError:
+                continue
+        token = token.strip()
+        if _is_upstox_token_valid(token):
+            print(f"Using the current valid Upstox token from {source}.")
             return token
-    except OSError:
-        pass
     return ""
 
 UPSTOX_ACCESS_TOKEN = get_upstox_token()
