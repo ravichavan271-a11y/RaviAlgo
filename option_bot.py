@@ -458,9 +458,11 @@ def updater():
                     batch.append({"range": f"G{rnum}:J{rnum}", "values": [[ce["ltp"], f"{ce['change']:.2f}%", f"{ce['dist']:.1f}%", get_status(ce)]]})
                 if pe and pe["ltp"]>0:
                     batch.append({"range": f"R{rnum}:U{rnum}", "values": [[pe["ltp"], f"{pe['change']:.2f}%", f"{pe['dist']:.1f}%", get_status(pe)]]})
-            if batch:
-                try: sheet.batch_update(batch)
-                except: pass
+            if batch and loop % 15 == 0:
+                try:
+                    sheet.batch_update(batch)
+                except Exception as exc:
+                    print(f"Sheets batch update failed: {type(exc).__name__}")
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
