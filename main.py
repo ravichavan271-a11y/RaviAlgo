@@ -164,36 +164,22 @@ def status():
     tok=get_token_automatic()
     return jsonify({"time": datetime.now(IST).isoformat(), "market_open": is_market_open(), "msg": get_market_status_msg(), "token_exists": bool(tok), "files": file_status})
 
-def auto_token_requester():
-    requested_date = None
+def telegram_login_link_reminder():
+    sent_date = None
+    login_url = "https://ravialgo.onrender.com/upstox-login"
     while True:
         try:
             now = datetime.now(IST)
-            if now.weekday() < 5 and (now.hour, now.minute) >= (8, 30) and requested_date != now.date():
-                requested_date = now.date()
-                current = get_token_automatic()
-                if current and is_token_valid(current):
-                    print("Upstox token is already valid today; skipping approval request.")
-                else:
-                    api_key = os.environ.get("UPSTOX_API_KEY", "").strip()
-                    api_secret = os.environ.get("UPSTOX_API_SECRET", "").strip()
-                    if not api_key or not api_secret:
-                        print("Upstox token request skipped: API credentials are not configured.")
-                    else:
-                        url = "https://api.upstox.com/v3/login/auth/token/request/" + requests.utils.quote(api_key, safe="")
-                        response = requests.post(
-                            url,
-                            headers={"Accept": "application/json", "Content-Type": "application/json"},
-                            json={"client_secret": api_secret},
-                            timeout=15,
-                        )
-                        if response.status_code == 200 and response.json().get("status") == "success":
-                            print("Upstox token request sent; account-holder approval is required in Upstox.")
-                            send_telegram_msg("🔐 Upstox token request is ready. Approve it in the Upstox app; both bots will read the approved token from Dsheet.")
-                        else:
-                            print(f"Upstox token request failed with HTTP {response.status_code}; check notifier URL/app configuration.")
+            if now.weekday() < 5 and (now.hour, now.minute) >= (9, 0) and sent_date != now.date():
+                sent_date = now.date()
+                send_telegram_msg(
+                    "🔐 <b>Upstox login needed</b>\\n"
+                    f'<a href="{login_url}">Tap here to log in to Upstox</a>\\n'
+                    "After login, the token is saved to Dsheet and both bots start automatically."
+                )
+                print("Sent the 9 AM Upstox login link to Telegram.")
         except Exception as exc:
-            print(f"Upstox token request error: {type(exc).__name__}")
+            print(f"Could not send Upstox login reminder: {type(exc).__name__}")
         time.sleep(30)
 
 
@@ -257,8 +243,8 @@ def delayed_start():
     threading.Thread(target=run_upstox,daemon=True).start()
     threading.Thread(target=run_option_bot,daemon=True).start()
     threading.Thread(target=auto_token_watcher,daemon=True).start()
-    threading.Thread(target=auto_token_requester,daemon=True).start()
-    print("✅ Upstock5, option_bot, and token requester threads started")
+    threading.Thread(target=telegram_login_link_reminder,daemon=True).start()
+    print("✅ Upstock5, option_bot, and 9 AM login reminder threads started")
 
 threading.Thread(target=delayed_start,daemon=True).start()
 
