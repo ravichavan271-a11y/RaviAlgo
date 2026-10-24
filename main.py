@@ -80,31 +80,31 @@ def get_token_automatic():
     except Exception as e: print(f"B1 fetch error: {e}")
     return None
 
-file_status = {"upstock4": {"running": False, "last_start": "", "error": "", "count": 0}}
+file_status = {"upstock5": {"running": False, "last_start": "", "error": "", "count": 0}}
 
 def run_upstox():
     while True:
         if not is_market_open():
-            file_status["upstock4"]["running"]=False
+            file_status["upstock5"]["running"]=False
             print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {get_market_status_msg()} - Sleep 60s")
             time.sleep(60)
             continue
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock4.py - 9:00-3:45")
-            file_status["upstock4"]["running"]=True
-            file_status["upstock4"]["last_start"]=datetime.now(IST).isoformat()
-            file_status["upstock4"]["count"]+=1
+            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock5.py - 9:00-3:45")
+            file_status["upstock5"]["running"]=True
+            file_status["upstock5"]["last_start"]=datetime.now(IST).isoformat()
+            file_status["upstock5"]["count"]+=1
             tok = get_token_automatic()
             if not tok:
                 print("Waiting 60s for token...")
                 time.sleep(60)
                 continue
-            if 'Upstock4' in sys.modules: del sys.modules['Upstock4']
-            import Upstock4
+            if 'Upstock5' in sys.modules: del sys.modules['Upstock5']
+            import Upstock5
         except Exception as e:
             import traceback
-            print(f"Upstock4 CRASHED: {e}\n{traceback.format_exc()[:500]}")
-            file_status["upstock4"]["running"]=False
+            print(f"Upstock5 CRASHED: {e}\n{traceback.format_exc()[:500]}")
+            file_status["upstock5"]["running"]=False
             time.sleep(10)
 
 def auto_token_watcher():
