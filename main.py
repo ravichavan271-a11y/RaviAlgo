@@ -32,10 +32,17 @@ app = Flask(__name__)
 
 def send_telegram_msg(text):
     try:
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return False
         url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+        response = requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        return response.status_code == 200 and response.json().get("ok") is True
+    except Exception:
+        return False
 
 def get_gspread_client_main():
     import gspread
@@ -171,13 +178,16 @@ def telegram_login_link_reminder():
         try:
             now = datetime.now(IST)
             if now.weekday() < 5 and (now.hour, now.minute) >= (9, 0) and sent_date != now.date():
-                sent_date = now.date()
-                send_telegram_msg(
-                    "🔐 <b>Upstox login needed</b>\\n"
-                    f'<a href="{login_url}">Tap here to log in to Upstox</a>\\n'
+                message = (
+                    "🔐 <b>Upstox login needed</b>\n"
+                    f'<a href="{login_url}">Tap here to log in to Upstox</a>\n'
                     "After login, the token is saved to Dsheet and both bots start automatically."
                 )
-                print("Sent the 9 AM Upstox login link to Telegram.")
+                if send_telegram_msg(message):
+                    sent_date = now.date()
+                    print("Sent the 9 AM Upstox login link to Telegram.")
+                else:
+                    print("Telegram login reminder failed; retrying in 30 seconds.")
         except Exception as exc:
             print(f"Could not send Upstox login reminder: {type(exc).__name__}")
         time.sleep(30)
