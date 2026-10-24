@@ -164,6 +164,62 @@ def status():
     tok=get_token_automatic()
     return jsonify({"time": datetime.now(IST).isoformat(), "market_open": is_market_open(), "msg": get_market_status_msg(), "token_exists": bool(tok), "files": file_status})
 
+def auto_token_requester():
+    requested_date = None
+    while True:
+        try:
+            now = datetime.now(IST)
+            if now.weekday() < 5 and (now.hour, now.minute) >= (8, 30) and requested_date != now.date():
+                requested_date = now.date()
+                current = get_token_automatic()
+                if current and is_token_valid(current):
+                    print("Upstox token is already valid today; skipping approval request.")
+                else:
+                    api_key = os.environ.get("UPSTOX_API_KEY", "").strip()
+                    api_secret = os.environ.get("UPSTOX_API_SECRET", "").strip()
+                    if not api_key or not api_secret:
+                        print("Upstox token request skipped: API credentials are not configured.")
+                    else:
+                        url = "https://api.upstox.com/v3/login/auth/token/request/" + requests.utils.quote(api_key, safe="")
+                        response = requests.post(
+                            url,
+                            headers={"Accept": "application/json", "Content-Type": "application/json"},
+                            json={"client_secret": api_secret},
+                            timeout=15,
+                        )
+                        if response.status_code == 200 and response.json().get("status") == "success":
+                            print("Upstox token request sent; account-holder approval is required in Upstox.")
+                            send_telegram_msg("🔐 Upstox token request is ready. Approve it in the Upstox app; both bots will read the approved token from Dsheet.")
+                        else:
+                            print(f"Upstox token request failed with HTTP {response.status_code}; check notifier URL/app configuration.")
+        except Exception as exc:
+            print(f"Upstox token request error: {type(exc).__name__}")
+        time.sleep(30)
+
+
+@app.route('/upstox/notifier', methods=['POST'])
+def upstox_notifier():
+    payload = request.get_json(silent=True) or {}
+    expected_client_id = os.environ.get("UPSTOX_API_KEY", "").strip()
+    token = str(payload.get("access_token", "")).strip()
+    if payload.get("client_id") != expected_client_id or payload.get("message_type") != "access_token":
+        return jsonify({"status": "ignored"}), 400
+    if not is_token_valid(token):
+        return jsonify({"status": "invalid_token"}), 400
+    try:
+        with open(TOKEN_FILE, "w", encoding="utf-8") as token_file:
+            token_file.write(token)
+        os.environ["UPSTOX_ACCESS_TOKEN"] = token
+        gc = get_gspread_client_main()
+        gc.open("Dsheet").sheet1.update_cell(1, 2, token)
+        print("Approved Upstox token saved to Dsheet.")
+        send_telegram_msg("✅ Upstox token approved and saved to Dsheet. Both bots can start.")
+        return jsonify({"status": "ok"}), 200
+    except Exception as exc:
+        print(f"Could not save approved Upstox token: {type(exc).__name__}")
+        return jsonify({"status": "save_failed"}), 500
+
+
 @app.route('/upstox-login')
 def upstox_login():
     api_key=os.environ.get("UPSTOX_API_KEY")
@@ -201,7 +257,8 @@ def delayed_start():
     threading.Thread(target=run_upstox,daemon=True).start()
     threading.Thread(target=run_option_bot,daemon=True).start()
     threading.Thread(target=auto_token_watcher,daemon=True).start()
-    print("✅ Upstock5 and option_bot threads started")
+    threading.Thread(target=auto_token_requester,daemon=True).start()
+    print("✅ Upstock5, option_bot, and token requester threads started")
 
 threading.Thread(target=delayed_start,daemon=True).start()
 
