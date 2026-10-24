@@ -134,6 +134,30 @@ def get_status(it):
     if it["ltp"]>0 and it["wl"]>0 and it["ltp"]<it["wl"]: return "BREAKDOWN"
     return ""
 
+def send_breakout_alerts(instrument_data):
+    for sec_name, symbols in STRUCTURE.items():
+        if sec_name == "MOST LIQUID STOCKS":
+            continue
+        candidates = [(mp.get(sec_name), sec_name)]
+        candidates.extend((mp.get(symbol), symbol) for symbol in symbols)
+        for instrument_key, symbol in candidates:
+            if not instrument_key or instrument_key not in instrument_data:
+                continue
+            item = instrument_data[instrument_key]
+            status = get_status(item)
+            if not status:
+                continue
+            alert_key = (instrument_key, status)
+            if alert_key in ALERTED:
+                continue
+            ALERTED.add(alert_key)
+            message = (
+                f"🚨 <b>Dsheet {status}</b>\\n"
+                f"{symbol} | LTP: ₹{item['ltp']:.2f}\\n"
+                f"{datetime.now(IST).strftime('%H:%M:%S IST')}"
+            )
+            send_telegram(message)
+
 def parse_date(val):
     if not val: return ""
     s = str(val).strip().split()[0].replace("/", "-").replace(".", "-")
@@ -457,6 +481,7 @@ if __name__ == "__main__":
                                 print(f"REST err {e}")
                         
                         try:
+                            send_breakout_alerts(instrument_data)
                             smooth_update_sheet(sheet, build_sorted(instrument_data))
                             try:
                                 breakout_sheet.clear()
