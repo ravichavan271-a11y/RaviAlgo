@@ -194,7 +194,7 @@ def upstox_callback():
         else: return f"Error: {token_data}"
     except Exception as e: return f"Error: {e}"
 
-print("=== STARTING FIXED - ONLY UPSTOCK4 ===")
+print("=== STARTING UPSTOCK5 + OPTION BOT ===")
 
 def delayed_start():
     time.sleep(10)
