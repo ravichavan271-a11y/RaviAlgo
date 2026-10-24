@@ -457,6 +457,7 @@ if __name__ == "__main__":
             
             last=time.time()
             last_rest_fetch = time.time()
+            last_sheet_update = 0
             rest_count = 0
             
             while is_market_time():
@@ -482,13 +483,15 @@ if __name__ == "__main__":
                         
                         try:
                             send_breakout_alerts(instrument_data)
-                            smooth_update_sheet(sheet, build_sorted(instrument_data))
-                            try:
-                                breakout_sheet.clear()
-                                breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
-                            except: pass
+                            if now - last_sheet_update >= 30:
+                                last_sheet_update = now
+                                if smooth_update_sheet(sheet, build_sorted(instrument_data)):
+                                    breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
+                                    print(f"✅ Sheets refreshed {datetime.now(IST).strftime('%H:%M:%S')}")
+                                else:
+                                    print("⚠ Sheet refresh deferred after a write error.")
                             status = "WS" if state["ws_connected"] else "REST"
-                            print(f"🔄 Updated {datetime.now(IST).strftime('%H:%M:%S')} via {status} - Smooth No Blink")
+                            print(f"🔄 Checked {datetime.now(IST).strftime('%H:%M:%S')} via {status}")
                         except Exception as e:
                             print(f"Update err {e}")
                     last = now
