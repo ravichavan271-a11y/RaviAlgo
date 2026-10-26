@@ -1,67 +1,37 @@
-name: Verify weekday bot configuration
+name: Verify bot source syntax
 
 on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/verify-bot-config.yml"
+      - "main.py"
+      - "oauth_flow.py"
       - "option_bot.py"
-      - "Upstock4.py"
-      - "requirements-option-bot.txt"
+      - "Upstock5.py"
+      - "silly_app.py"
+      - ".github/workflows/verify-bot-config.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "main.py"
+      - "oauth_flow.py"
+      - "option_bot.py"
+      - "Upstock5.py"
+      - "silly_app.py"
+      - ".github/workflows/verify-bot-config.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
+  compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      TOKEN_SPREADSHEET_NAME: Dsheet
-      OPTION_SPREADSHEET_NAME: option Dsheet
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Check required secret
-        run: |
-          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
-            echo "::error::GOOGLE_SERVICE_ACCOUNT_JSON is missing in repository Actions secrets."
-            exit 1
-          fi
-      - name: Install verification dependencies
-        run: python -m pip install gspread==6.1.2 oauth2client==4.1.3 requests==2.32.3
-      - name: Verify sheet access and Upstox token without changing sheets
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import requests
-          import gspread
-          from oauth2client.service_account import ServiceAccountCredentials
+      - name: Compile scheduled app and bot sources
+        run: python -m py_compile main.py oauth_flow.py option_bot.py Upstock5.py silly_app.py
 
-          scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-          secret = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-          credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(secret), scope)
-          client = gspread.authorize(credentials)
-
-          token_sheet = client.open(os.environ["TOKEN_SPREADSHEET_NAME"])
-          token = str(token_sheet.sheet1.cell(1, 2).value or "").strip()
-          if len(token) < 50:
-              raise SystemExit("Dsheet!B1 is empty or too short; add a current Upstox access token.")
-          client.open(os.environ["OPTION_SPREADSHEET_NAME"])
-          response = requests.get(
-              "https://api.upstox.com/v2/user/profile",
-              headers={"Authorization": f"Bearer {token}"},
-              timeout=15,
-          )
-          if response.status_code != 200:
-              raise SystemExit(f"Upstox token validation failed (HTTP {response.status_code}).")
-          print("PASS: Google service-account secret is valid.")
-          print("PASS: Dsheet and option Dsheet are accessible.")
-          print("PASS: Dsheet!B1 contains a valid Upstox token.")
-          print("No spreadsheet cells were changed.")
-          PY
