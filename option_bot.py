@@ -49,16 +49,15 @@ def get_upstox_token():
     except Exception as exc:
         print(f"TOKEN SHEET ERR: {type(exc).__name__}")
 
-    for source, token in (
+    candidates = [
         ("environment", os.getenv("UPSTOX_ACCESS_TOKEN", "") or os.getenv("UPSTOX_TOKEN", "")),
-        ("token.txt", ""),
-    ):
-        if source == "token.txt":
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as token_file:
-                    token = token_file.read().strip()
-            except OSError:
-                continue
+    ]
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "token.txt"), "r") as token_file:
+            candidates.append(("token.txt", token_file.read().strip()))
+    except OSError:
+        pass
+    for source, token in candidates:
         token = token.strip()
         if _is_upstox_token_valid(token):
             print(f"Using the current valid Upstox token from {source}.")
@@ -422,8 +421,9 @@ streamer.on("open", on_open); streamer.on("message", on_message); streamer.conne
 
 def updater():
     loop=0
+    last_sheet_update=time.monotonic()
     while True:
-        time.sleep(2)
+        time.sleep(0.25)
         with lock:
             for ikey, ltp in list(pending.items()):
                 if ikey in option_data:
@@ -442,27 +442,27 @@ def updater():
                     fetch_ltp(option_keys, option_data)
                     fetch_ltp(index_keys, index_data)
                 except: pass
-            batch=[]
-            batch.append({"range": f"C3", "values": [[datetime.now().strftime("%H:%M:%S")]]})
-            for sym, rnum in row_map_index.items():
-                for k,v in index_data.items():
-                    if v["symbol"]==sym and v["ltp"]>0:
-                        batch.append({"range": f"B{rnum}:I{rnum}", "values": [[v["pdh"], v["pdl"], v["wh"], v["wl"], v["ltp"], f"{v['change']:.2f}%", f"{v['dist']:.1f}%", get_status(v)]]})
-            for stock, rnum in row_map_stock.items():
-                ce=None; pe=None
-                for k,v in option_data.items():
-                    if v["underlying"]==stock:
-                        if v["otype"]=="CE": ce=v
-                        if v["otype"]=="PE": pe=v
-                if ce and ce["ltp"]>0:
-                    batch.append({"range": f"G{rnum}:J{rnum}", "values": [[ce["ltp"], f"{ce['change']:.2f}%", f"{ce['dist']:.1f}%", get_status(ce)]]})
-                if pe and pe["ltp"]>0:
-                    batch.append({"range": f"R{rnum}:U{rnum}", "values": [[pe["ltp"], f"{pe['change']:.2f}%", f"{pe['dist']:.1f}%", get_status(pe)]]})
-            if batch and loop % 15 == 0:
-                try:
-                    sheet.batch_update(batch)
-                except Exception as exc:
-                    print(f"Sheets batch update failed: {type(exc).__name__}")
+            if time.monotonic()-last_sheet_update >= 5:
+                batch=[]
+                batch.append({"range": f"C3", "values": [[datetime.now().strftime("%H:%M:%S")]]})
+                for sym, rnum in row_map_index.items():
+                    for k,v in index_data.items():
+                        if v["symbol"]==sym and v["ltp"]>0:
+                            batch.append({"range": f"B{rnum}:I{rnum}", "values": [[v["pdh"], v["pdl"], v["wh"], v["wl"], v["ltp"], f"{v['change']:.2f}%", f"{v['dist']:.1f}%", get_status(v)]]})
+                for stock, rnum in row_map_stock.items():
+                    ce=None; pe=None
+                    for k,v in option_data.items():
+                        if v["underlying"]==stock:
+                            if v["otype"]=="CE": ce=v
+                            if v["otype"]=="PE": pe=v
+                    if ce and ce["ltp"]>0:
+                        batch.append({"range": f"G{rnum}:J{rnum}", "values": [[ce["ltp"], f"{ce['change']:.2f}%", f"{ce['dist']:.1f}%", get_status(ce)]]})
+                    if pe and pe["ltp"]>0:
+                        batch.append({"range": f"R{rnum}:U{rnum}", "values": [[pe["ltp"], f"{pe['change']:.2f}%", f"{pe['dist']:.1f}%", get_status(pe)]]})
+                if batch:
+                    try: sheet.batch_update(batch)
+                    except Exception as exc: print(f"Google Sheet update error: {exc}")
+                last_sheet_update += 5
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
