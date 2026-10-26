@@ -38,18 +38,36 @@ def get_gspread_client():
             except: pass
     raise Exception("GOOGLE_SERVICE_ACCOUNT_JSON missing")
 
+def is_token_valid(token):
+    if not token or len(token) <= 50:
+        return False
+    try:
+        response = requests.get(
+            "https://api.upstox.com/v2/user/profile",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
 def get_token():
-    tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
-    if tok and len(tok)>50: return tok
+    # Prefer the token refreshed in Dsheet each morning over a stale deploy secret.
     try:
         gc_temp=get_gspread_client()
         sh=gc_temp.open(SPREADSHEET_NAME)
         b1=str(sh.sheet1.cell(1,2).value or "").strip()
-        if len(b1)>50: return b1
+        if is_token_valid(b1):
+            print("Using the valid Upstox token from Dsheet.", flush=True)
+            return b1
     except: pass
-    raise Exception("UPSTOX_ACCESS_TOKEN missing")
+    tok = os.environ.get("UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_TOKEN", "")
+    if is_token_valid(tok):
+        print("Using the valid Upstox token from environment.", flush=True)
+        return tok
+    raise Exception("No valid Upstox token found in Dsheet or environment")
 
-UPSTOX_ACCESS_TOKEN = get_token()
+UPSTOX_ACCESS_TOKEN = ""
 
 def is_market_time():
     now = datetime.now(IST)
@@ -63,16 +81,20 @@ def wait_until_market():
         now = datetime.now(IST)
         if now.weekday() >= 5:
             next_monday = now + timedelta(days=(7 - now.weekday()))
-            next_monday = next_monday.replace(hour=9, minute=0, second=0, microsecond=0)
+            next_monday = next_monday.replace(hour=9, minute=1, second=0, microsecond=0)
             sleep_sec = (next_monday - now).total_seconds()
             print(f"📅 WEEKEND {now.strftime('%A')} - Sleeping {int(sleep_sec/3600)}h")
             time.sleep(min(sleep_sec, 3600))
             continue
-        if is_market_time():
+        if is_market_time() and (now.hour > 9 or (now.hour == 9 and now.minute >= 1)):
             print(f"✅ {now.strftime('%A')} Market Time {now.strftime('%H:%M:%S IST')} - Starting...")
             ALERTED.clear()
             return True
-        time.sleep(60)
+        if now.hour < 9 or (now.hour == 9 and now.minute < 1):
+            target = now.replace(hour=9, minute=1, second=0, microsecond=0)
+            time.sleep(min(max(1, (target - now).total_seconds()), 60))
+        else:
+            time.sleep(60)
 
 print("Downloading instruments...")
 r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", timeout=30)
@@ -135,6 +157,7 @@ def get_status(it):
     return ""
 
 def send_breakout_alerts(instrument_data):
+    """Send one Telegram notification per symbol/status during this session."""
     for sec_name, symbols in STRUCTURE.items():
         if sec_name == "MOST LIQUID STOCKS":
             continue
@@ -152,8 +175,8 @@ def send_breakout_alerts(instrument_data):
                 continue
             ALERTED.add(alert_key)
             message = (
-                f"🚨 <b>Dsheet {status}</b>\\n"
-                f"{symbol} | LTP: ₹{item['ltp']:.2f}\\n"
+                f"🚨 <b>Dsheet {status}</b>\n"
+                f"{symbol} | LTP: ₹{item['ltp']:.2f}\n"
                 f"{datetime.now(IST).strftime('%H:%M:%S IST')}"
             )
             send_telegram(message)
@@ -393,6 +416,7 @@ if __name__ == "__main__":
     while True:
         try:
             wait_until_market()
+            UPSTOX_ACCESS_TOKEN = get_token()
             instrument_data, all_keys, sh, sheet, breakout_sheet = run_once()
             print("🔴 LIVE STARTED - MON-FRI 9 AM to 3:40 PM + TELEGRAM + REST FALLBACK")
             
@@ -457,7 +481,6 @@ if __name__ == "__main__":
             
             last=time.time()
             last_rest_fetch = time.time()
-            last_sheet_update = 0
             rest_count = 0
             
             while is_market_time():
@@ -483,18 +506,16 @@ if __name__ == "__main__":
                         
                         try:
                             send_breakout_alerts(instrument_data)
-                            if now - last_sheet_update >= 30:
-                                last_sheet_update = now
-                                if smooth_update_sheet(sheet, build_sorted(instrument_data)):
-                                    breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
-                                    print(f"✅ Sheets refreshed {datetime.now(IST).strftime('%H:%M:%S')}")
-                                else:
-                                    print("⚠ Sheet refresh deferred after a write error.")
+                            smooth_update_sheet(sheet, build_sorted(instrument_data))
+                            try:
+                                breakout_sheet.clear()
+                                breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
+                            except: pass
                             status = "WS" if state["ws_connected"] else "REST"
-                            print(f"🔄 Checked {datetime.now(IST).strftime('%H:%M:%S')} via {status}")
+                            print(f"🔄 Updated {datetime.now(IST).strftime('%H:%M:%S')} via {status} - Smooth No Blink")
                         except Exception as e:
                             print(f"Update err {e}")
-                    last = now
+                    last += 5
             
             print("Market closed or Weekend - Going to sleep till next MON-FRI 9 AM")
             send_telegram(f"😴 <b>Market Closed</b>\n📅 {datetime.now(IST).strftime('%A %d %b %H:%M IST')}\nNext run: Next MON-FRI 9 AM\nREST Fallbacks: {rest_count}")

@@ -1,263 +1,162 @@
-import os, json, threading, time, logging, sys, subprocess
-from datetime import datetime
-import pytz, requests
-from flask import Flask, jsonify, request, redirect
+"""Render controller for Upstox OAuth and the option_bot only."""
 
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
-import warnings
-warnings.filterwarnings("ignore")
+from datetime import datetime, time as day_time
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+from zoneinfo import ZoneInfo
 
-IST = pytz.timezone('Asia/Kolkata')
-TOKEN_FILE = "upstox_token.txt"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID","")
+from flask import Flask, redirect, request
 
-def is_market_open():
-    now = datetime.now(IST)
-    if now.weekday() >= 5: return False
-    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now.replace(hour=15, minute=45, second=0, microsecond=0)
-    return market_start <= now <= market_end
+from oauth_flow import build_login_url, handle_callback, send_login_reminder
 
-def get_market_status_msg():
-    now = datetime.now(IST)
-    if now.weekday() >=5: return f"Weekend - {now.strftime('%A %H:%M:%S IST')}"
-    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now.replace(hour=15, minute=45, second=0, microsecond=0)
-    if now < market_start: return f"Market Ajun Open Nahi - {now.strftime('%H:%M:%S IST')}"
-    elif now > market_end: return f"Market Band - {now.strftime('%H:%M:%S IST')}"
-    else: return f"Market Chalu - {now.strftime('%H:%M:%S IST')}"
 
+IST = ZoneInfo("Asia/Kolkata")
+LOGIN_AT = day_time(8, 30)
+START_AT = day_time(9, 1)
+STOP_AT = day_time(15, 45)
+ROOT = Path(__file__).resolve().parent
 app = Flask(__name__)
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+BOT_STATUS = {"running": False, "last_start": None, "restarts": 0, "last_exit": None}
 
-def send_telegram_msg(text):
-    try:
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            return False
-        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        response = requests.post(
-            url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        return response.status_code == 200 and response.json().get("ok") is True
-    except Exception:
-        return False
 
-def get_gspread_client_main():
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    for SERVICE_FILE in ["service_account.json", "./service_account.json", "/etc/secrets/service_account.json"]:
-        if os.path.exists(SERVICE_FILE):
-            try: return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name(SERVICE_FILE, scope))
-            except: pass
-    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
-    if env_json:
-        try:
-            creds_dict = json.loads(env_json)
-            return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
-        except: pass
-    raise Exception("service_account.json missing")
+def now_ist():
+    return datetime.now(IST)
 
-def is_token_valid(token):
-    if not token or len(token)<50: return False
-    try:
-        r = requests.get("https://api.upstox.com/v2/user/profile", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        return r.status_code==200
-    except: return False
 
-def get_token_automatic():
-    def token_ok(t): return t and len(t)>100 and "eyJ" in str(t)
-    tok = os.environ.get("UPSTOX_ACCESS_TOKEN","") or os.environ.get("UPSTOX_TOKEN","")
-    if token_ok(tok) and is_token_valid(tok): return tok
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE,"r") as f: tok=f.read().strip()
-            if token_ok(tok) and is_token_valid(tok): return tok
-        except: pass
-    try:
-        gc = get_gspread_client_main()
-        sh = gc.open("Dsheet")
-        b1 = str(sh.sheet1.cell(1,2).value or "").strip()
-        if token_ok(b1) and is_token_valid(b1):
-            with open(TOKEN_FILE,"w") as f: f.write(b1)
-            os.environ["UPSTOX_ACCESS_TOKEN"]=b1
-            return b1
-    except Exception as e: print(f"B1 fetch error: {e}")
-    return None
-
-file_status = {"upstock5": {"running": False, "last_start": "", "error": "", "count": 0}, "option_bot": {"running": False, "last_start": "", "error": "", "count": 0}}
-
-def run_upstox():
-    while True:
-        if not is_market_open():
-            file_status["upstock5"]["running"]=False
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {get_market_status_msg()} - Sleep 60s")
-            time.sleep(60)
-            continue
-        try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting Upstock5.py - 9:00-3:45")
-            file_status["upstock5"]["running"]=True
-            file_status["upstock5"]["last_start"]=datetime.now(IST).isoformat()
-            file_status["upstock5"]["count"]+=1
-            tok = get_token_automatic()
-            if not tok:
-                print("Waiting 60s for token...")
-                time.sleep(60)
-                continue
-            if 'Upstock5' in sys.modules: del sys.modules['Upstock5']
-            import Upstock5
-        except Exception as e:
-            import traceback
-            print(f"Upstock5 CRASHED: {e}\n{traceback.format_exc()[:500]}")
-            file_status["upstock5"]["running"]=False
-            time.sleep(10)
-
-def run_option_bot():
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "option_bot.py")
-    while True:
-        if not is_market_open():
-            file_status["option_bot"]["running"] = False
-            time.sleep(60)
-            continue
+def run_option_bot_session():
+    """Supervise only option_bot.py on Render; never start Upstock5 here."""
+    script = ROOT / "option_bot.py"
+    while now_ist().time() < STOP_AT:
         process = None
         try:
-            print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Starting option_bot.py - 9:00-3:45")
-            file_status["option_bot"].update({"running": True, "last_start": datetime.now(IST).isoformat(), "error": ""})
-            file_status["option_bot"]["count"] += 1
-            process = subprocess.Popen([sys.executable, "-u", script_path], cwd=os.path.dirname(script_path))
-            while process.poll() is None and is_market_open():
-                time.sleep(5)
+            if not script.is_file():
+                raise FileNotFoundError("option_bot.py is missing")
+            BOT_STATUS.update({"running": True, "last_start": now_ist().isoformat()})
+            print(f"Starting option_bot.py at {now_ist():%H:%M:%S IST}.", flush=True)
+            process = subprocess.Popen(
+                [sys.executable, "-u", str(script)], cwd=ROOT, env=os.environ.copy()
+            )
+            while now_ist().time() < STOP_AT and process.poll() is None:
+                time.sleep(2)
             if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                print("Stopped option_bot.py at the 15:45 IST session end.", flush=True)
+                break
+
+            BOT_STATUS["last_exit"] = process.returncode
+            BOT_STATUS["running"] = False
+            if now_ist().time() < STOP_AT:
+                BOT_STATUS["restarts"] += 1
+                print(
+                    f"option_bot.py exited ({process.returncode}); retrying in 30 seconds.",
+                    flush=True,
+                )
+                time.sleep(30)
+        except Exception as exc:
+            BOT_STATUS["running"] = False
+            BOT_STATUS["last_exit"] = type(exc).__name__
+            BOT_STATUS["restarts"] += 1
+            print(f"option_bot.py start failed: {type(exc).__name__}; retrying in 30 seconds.", flush=True)
+            time.sleep(30)
+        finally:
+            if process is not None and process.poll() is None:
                 process.terminate()
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            return_code = process.returncode
-            file_status["option_bot"]["running"] = False
-            if return_code not in (0, None):
-                file_status["option_bot"]["error"] = f"option_bot.py exited with code {return_code}"
-                print(file_status["option_bot"]["error"])
-            if is_market_open():
-                time.sleep(60)
-        except Exception as e:
-            file_status["option_bot"]["running"] = False
-            file_status["option_bot"]["error"] = str(e)
-            print(f"option_bot.py failed: {e}")
-            if process and process.poll() is None:
-                process.terminate()
-            time.sleep(60)
+    BOT_STATUS["running"] = False
 
-def auto_token_watcher():
+
+def daily_scheduler():
+    login_sent_date = None
+    session_started_date = None
     while True:
-        try:
-            time.sleep(300)
-            get_token_automatic()
-        except: time.sleep(60)
+        now = now_ist()
+        if now.weekday() < 5:
+            if LOGIN_AT <= now.time() < START_AT and login_sent_date != now.date():
+                try:
+                    if send_login_reminder("RENDER"):
+                        login_sent_date = now.date()
+                    else:
+                        print("Login reminder was not sent; retrying in 30 seconds.", flush=True)
+                        time.sleep(30)
+                except Exception as exc:
+                    print(f"Login reminder failed: {type(exc).__name__}; retrying in 30 seconds.", flush=True)
+                    time.sleep(30)
 
-@app.route('/')
+            if (
+                START_AT <= now.time() < STOP_AT
+                and session_started_date != now.date()
+            ):
+                session_started_date = now.date()
+                with _scheduler_lock:
+                    run_option_bot_session()
+
+        time.sleep(5)
+
+
+@app.get("/")
 def home():
-    tok=get_token_automatic()
-    return f"<h1>✅ 9:00-3:45 AUTO MODE</h1><p>Time: {datetime.now(IST)}<br>Token: {bool(tok)}<br><a href='/status'>Status</a></p>"
+    return (
+        "<h2>RaviAlgo controller</h2>"
+        f"<p>Time: {now_ist():%Y-%m-%d %H:%M:%S IST}</p>"
+        "<p>Render runs option_bot.py; Silly runs Upstock5.py.</p>"
+        "<p><a href='/status'>Status</a></p>"
+    )
 
-@app.route('/ping')
-def ping(): return f"PONG {datetime.now(IST)}",200
 
-@app.route('/status')
+@app.get("/ping")
+def ping():
+    return "ok", 200
+
+
+@app.get("/status")
 def status():
-    tok=get_token_automatic()
-    return jsonify({"time": datetime.now(IST).isoformat(), "market_open": is_market_open(), "msg": get_market_status_msg(), "token_exists": bool(tok), "files": file_status})
-
-def telegram_login_link_reminder():
-    sent_date = None
-    login_url = "https://ravialgo.onrender.com/upstox-login"
-    while True:
-        try:
-            now = datetime.now(IST)
-            if now.weekday() < 5 and (now.hour, now.minute) >= (9, 0) and sent_date != now.date():
-                message = (
-                    "🔐 <b>Upstox login needed</b>\n"
-                    f'<a href="{login_url}">Tap here to log in to Upstox</a>\n'
-                    "After login, the token is saved to Dsheet and both bots start automatically."
-                )
-                if send_telegram_msg(message):
-                    sent_date = now.date()
-                    print("Sent the 9 AM Upstox login link to Telegram.")
-                else:
-                    print("Telegram login reminder failed; retrying in 30 seconds.")
-        except Exception as exc:
-            print(f"Could not send Upstox login reminder: {type(exc).__name__}")
-        time.sleep(30)
+    return {
+        "time_ist": now_ist().isoformat(),
+        "market_session": "09:01-15:45 IST, weekdays",
+        "render_bot": "option_bot.py",
+        "silly_bot": "Upstock5.py",
+        "option_bot": dict(BOT_STATUS),
+    }
 
 
-@app.route('/upstox/notifier', methods=['POST'])
-def upstox_notifier():
-    payload = request.get_json(silent=True) or {}
-    expected_client_id = os.environ.get("UPSTOX_API_KEY", "").strip()
-    token = str(payload.get("access_token", "")).strip()
-    if payload.get("client_id") != expected_client_id or payload.get("message_type") != "access_token":
-        return jsonify({"status": "ignored"}), 400
-    if not is_token_valid(token):
-        return jsonify({"status": "invalid_token"}), 400
-    try:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as token_file:
-            token_file.write(token)
-        os.environ["UPSTOX_ACCESS_TOKEN"] = token
-        gc = get_gspread_client_main()
-        gc.open("Dsheet").sheet1.update_cell(1, 2, token)
-        print("Approved Upstox token saved to Dsheet.")
-        send_telegram_msg("✅ Upstox token approved and saved to Dsheet. Both bots can start.")
-        return jsonify({"status": "ok"}), 200
-    except Exception as exc:
-        print(f"Could not save approved Upstox token: {type(exc).__name__}")
-        return jsonify({"status": "save_failed"}), 500
-
-
-@app.route('/upstox-login')
+@app.get("/upstox-login")
 def upstox_login():
-    api_key=os.environ.get("UPSTOX_API_KEY")
-    if not api_key: return "API_KEY not set",400
-    redirect_uri="https://ravialgo.onrender.com/upstox/callback"
-    url=f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
-    return redirect(url)
-
-@app.route('/upstox/callback')
-def upstox_callback():
-    code=request.args.get("code")
-    api_key=os.environ.get("UPSTOX_API_KEY"); api_secret=os.environ.get("UPSTOX_API_SECRET")
-    redirect_uri="https://ravialgo.onrender.com/upstox/callback"
     try:
-        data={'code':code,'client_id':api_key,'client_secret':api_secret,'redirect_uri':redirect_uri,'grant_type':'authorization_code'}
-        resp=requests.post("https://api.upstox.com/v2/login/authorization/token", headers={'Content-Type':'application/x-www-form-urlencoded'}, data=data, timeout=10)
-        token_data=resp.json()
-        access_token=token_data.get('access_token')
-        if access_token:
-            with open(TOKEN_FILE,"w") as f: f.write(access_token)
-            os.environ["UPSTOX_ACCESS_TOKEN"]=access_token
-            try:
-                gc = get_gspread_client_main()
-                sh = gc.open("Dsheet")
-                sh.sheet1.update_cell(1,2, access_token)
-            except: pass
-            return f"<h1>✅ Token Saved!</h1><a href='/'>Home</a>"
-        else: return f"Error: {token_data}"
-    except Exception as e: return f"Error: {e}"
+        return redirect(build_login_url(), code=302)
+    except Exception as exc:
+        print(f"Could not create Upstox login link: {type(exc).__name__}.", flush=True)
+        return "Upstox login link is not configured. Contact the app administrator.", 503
 
-print("=== STARTING UPSTOCK5 + OPTION BOT ===")
 
-def delayed_start():
-    time.sleep(10)
-    threading.Thread(target=run_upstox,daemon=True).start()
-    threading.Thread(target=run_option_bot,daemon=True).start()
-    threading.Thread(target=auto_token_watcher,daemon=True).start()
-    threading.Thread(target=telegram_login_link_reminder,daemon=True).start()
-    print("✅ Upstock5, option_bot, and 9 AM login reminder threads started")
+@app.get("/upstox/callback")
+@app.get("/oauth/callback")
+def upstox_callback():
+    status_code, body = handle_callback(request.full_path)
+    return body, status_code, {"Content-Type": "text/plain; charset=utf-8"}
 
-threading.Thread(target=delayed_start,daemon=True).start()
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",10000))
-    app.run(host='0.0.0.0',port=port, threaded=True)
+def start_scheduler_once():
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+    threading.Thread(target=daily_scheduler, name="ravi-daily-scheduler", daemon=True).start()
+
+
+start_scheduler_once()
+
