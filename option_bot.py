@@ -98,6 +98,9 @@ try:
     gc = gc or get_google_client()
     sh = gc.open(SPREADSHEET_NAME)
     sheet = sh.sheet1
+    sheet2 = sh.worksheet("BREAKOUT")
+    if sheet2 is None:
+        raise RuntimeError("Sheet 2 worksheet was not found")
     weekly_from, weekly_to = find_weekly_range_top3(sh)
     if not weekly_from or not weekly_to:
         weekly_to = datetime.now().strftime("%Y-%m-%d")
@@ -181,7 +184,7 @@ for sec, stocks in STRUCTURE.items():
     for sym in stocks:
         k=mp.get(sym)
         if k and k not in stock_underlying_data:
-            stock_underlying_data[k]={"symbol":sym,"ltp":0,"open":0,"csv": csv_last.get(k,0) or csv_last.get(sym,0)}
+            stock_underlying_data[k]={"symbol":sym,"ltp":0,"open":0,"csv":csv_last.get(k,0) or csv_last.get(sym,0),"prev_close":0,"pdh":0,"pdl":0,"change":0}
             stock_keys.append(k)
 
 def get_candle(k, fro, to):
@@ -258,6 +261,15 @@ for i in range(1,8):
     if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
 
 print(f"PD Day: {pd_day}")
+print("Fetching stock previous close / PDH / PDL...")
+with ThreadPoolExecutor(max_workers=10) as ex:
+    for k,candles in ex.map(lambda kk:get_candle(kk,pd_day,pd_day),stock_keys):
+        if candles and k in stock_underlying_data:
+            stock_underlying_data[k]["pdh"]=float(candles[0][2])
+            stock_underlying_data[k]["pdl"]=float(candles[0][3])
+            stock_underlying_data[k]["prev_close"]=float(candles[0][4])
+for it in stock_underlying_data.values():
+    it["change"]=(it["ltp"]-it["prev_close"])/it["prev_close"]*100 if it["prev_close"]>0 else 0
 
 # Weekly WH/WL
 with ThreadPoolExecutor(max_workers=10) as ex:
@@ -317,7 +329,7 @@ for stock, odf in stock_to_options.items():
         otype = str(row.get(option_type_col,"")).upper()
         ikey = row[instrument_key_col]
         if ikey not in option_data:
-            option_data[ikey] = {"underlying": stock, "strike": atm_strike, "otype": otype, "expiry": nearest_expiry.strftime("%d-%b-%Y"), "pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"change":0,"dist":0,"base":base, "csv":0}
+            option_data[ikey] = {"underlying": stock, "strike": atm_strike, "otype": otype, "expiry": nearest_expiry.strftime("%d-%b-%Y"), "pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"change":0,"dist":0,"base":base, "csv":0, "break_ts":None, "break_time":""}
             option_keys.append(ikey)
 
 print(f"Option Keys: {len(option_keys)}")
@@ -352,6 +364,24 @@ def get_status(it):
     if it["ltp"]<it["wl"]: return "BREAKDOWN"
     return ""
 
+def update_break_time(it, old_status):
+    new_status=get_status(it)
+    if new_status=="BREAKOUT" and old_status!="BREAKOUT":
+        now=datetime.now()
+        it["break_ts"]=now
+        it["break_time"]=now.strftime("%H:%M:%S")
+    elif new_status!="BREAKOUT":
+        it["break_ts"]=None
+        it["break_time"]=""
+
+# If the script starts while a contract is already above its weekly high,
+# use startup time as the earliest known breakout time for this run.
+for _it in option_data.values():
+    if get_status(_it)=="BREAKOUT":
+        _now=datetime.now()
+        _it["break_ts"]=_now
+        _it["break_time"]=_now.strftime("%H:%M:%S")
+
 row_map_index={}; row_map_stock={}
 
 def build_rows():
@@ -383,23 +413,251 @@ def build_rows():
         row_map_index[it["symbol"]]=rnum; rnum+=1
     return rows
 
-print("Writing to sheet...")
-try: sheet.batch_clear(["A4:Z5000"])
-except: pass
-final_rows = build_rows()
-sheet.update(values=final_rows, range_name="A4")
-sheet.update(values=[[datetime.now().strftime("%H:%M:%S")]], range_name="C3")
+
+row_map_index={}; row_map_stock={}; dashboard_row_map_index={}; row_map_option={}; option_panel_end_row=5000; option_panel_row_ranges={}
+
+def build_top_summary():
+    """Top five underlying-stock gainers and losers, ranked by spot change."""
+    grid=[[""]*22 for _ in range(7)]
+    grid[0][0]="TOP 5 GAINERS"
+    grid[0][11]="TOP 5 LOSERS"
+    grid[0][20]="Updated"
+    grid[0][21]=datetime.now().strftime("%H:%M:%S")
+    headers=["Stock","Spot LTP","% Change","PDH/PDL","ATM Option","Option %"]
+    grid[1][0:6]=headers
+    grid[1][11:17]=headers
+    candidates=[v for v in stock_underlying_data.values() if v.get("prev_close",0)>0 and v.get("ltp",0)>0]
+    gainers=sorted((v for v in candidates if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
+    losers=sorted((v for v in candidates if v["change"]<0),key=lambda x:x["change"])[:5]
+    def make_row(it,otype):
+        signal="PDH BREAK" if it.get("pdh",0)>0 and it["ltp"]>it["pdh"] else ("PDL BREAK" if it.get("pdl",0)>0 and it["ltp"]<it["pdl"] else "NO BREAK")
+        opt=next((v for v in option_data.values() if v["underlying"]==it["symbol"] and v["otype"]==otype),None)
+        return [it["symbol"],it["ltp"],f"{it['change']:+.2f}%",signal,f"{otype} {opt['strike']}" if opt else "",f"{opt['change']:+.2f}%" if opt else ""]
+    for i,it in enumerate(gainers): grid[i+2][0:6]=make_row(it,"CE")
+    for i,it in enumerate(losers): grid[i+2][11:17]=make_row(it,"PE")
+    return grid
+
+def build_dashboard():
+    """Build four live status panels and the index table below them."""
+    global dashboard_row_map_index, row_map_option, option_panel_end_row, option_panel_row_ranges
+    dashboard_row_map_index={}; row_map_option={}; option_panel_row_ranges={}
+    headers=["Stock","Strike","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","DIST%","STATUS","BREAK TIME"]
+    grid=[]
+    def put(row_idx, col_idx, values):
+        while len(grid) <= row_idx:
+            grid.append([])
+        while len(grid[row_idx]) < col_idx + len(values):
+            grid[row_idx].append("")
+        grid[row_idx][col_idx:col_idx+len(values)] = values
+    def panel(title, col, status, otype, title_row):
+        put(title_row, col, [title])
+        put(title_row+1, col, headers)
+        items=[v for v in option_data.values() if v["otype"]==otype and get_status(v)==status]
+        if status=="BREAKOUT":
+            items.sort(key=lambda x:(x.get("break_ts") or datetime.min,x.get("change",0)), reverse=True)
+        else:
+            items.sort(key=lambda x:x["change"], reverse=True)
+        for offset,it in enumerate(items,1):
+            row_idx=title_row+1+offset
+            put(row_idx,col,[it["underlying"],it["strike"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",status,it.get("break_time","")])
+            row_map_option[(it["underlying"],otype)]=row_idx+10
+        if items:
+            start_row_index=title_row+11
+            option_panel_row_ranges[(otype,status)]=(start_row_index,start_row_index+len(items))
+        return len(items)
+    ce_bo=panel("CE BREAKOUT",0,"BREAKOUT","CE",0)
+    pe_bo=panel("PE BREAKOUT",11,"BREAKOUT","PE",0)
+    breakdown_title=2+max(ce_bo,pe_bo)
+    ce_bd=panel("CE BREAKDOWN",0,"BREAKDOWN","CE",breakdown_title)
+    pe_bd=panel("PE BREAKDOWN",11,"BREAKDOWN","PE",breakdown_title)
+    index_title=breakdown_title+2+max(ce_bd,pe_bd)
+    option_panel_end_row=index_title+9 # exclusive zero-based row, before index table; dashboard starts at row 10
+    put(index_title,0,["=== INDEX ==="])
+    put(index_title+1,0,["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP (Spot)","CHANGE %","DIST%","STATUS"])
+    for offset,it in enumerate(sorted(index_data.values(),key=lambda x:x["change"],reverse=True),2):
+        row_idx=index_title+offset
+        put(row_idx,0,[it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)])
+        dashboard_row_map_index[it["symbol"]]=row_idx+10
+    return [row+[""]*(22-len(row)) for row in grid]
+
+def apply_pd_colors():
+    dark_green={"red":0.0,"green":0.4,"blue":0.0}
+    dark_red={"red":0.5,"green":0.0,"blue":0.0}
+    white={"red":1,"green":1,"blue":1}
+    rules=[]
+    def add_rule(formula,color,col_start,col_end,row_start,row_end):
+        if row_end>row_start:
+            rules.append((formula,color,col_start,col_end,row_start,row_end))
+
+    # Top 5 signal cells.
+    for col,col_index in [("D",3),("O",14)]:
+        add_rule(f'=${col}3="PDH BREAK"',dark_green,col_index,col_index+1,2,7)
+        add_rule(f'=${col}3="PDL BREAK"',dark_red,col_index,col_index+1,2,7)
+
+    # Apply option colors only to actual data rows in each panel, never to
+    # section titles, headers, or blank rows between CE/PE panels.
+    for (otype,_status),(row_start,row_end) in option_panel_row_ranges.items():
+        first_row=row_start+1
+        if otype=="CE":
+            ltp,pdh,pdl,week_high,week_low,status_col="G","C","D","E","F","J"
+            columns={"pdh":2,"pdl":3,"week_high":4,"week_low":5,"status":9}
+        else:
+            ltp,pdh,pdl,week_high,week_low,status_col="R","N","O","P","Q","U"
+            columns={"pdh":13,"pdl":14,"week_high":15,"week_low":16,"status":20}
+        specs=[
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdh}{first_row}),${ltp}{first_row}>=${pdh}{first_row})',dark_green,columns["pdh"]),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdl}{first_row}),${ltp}{first_row}<=${pdl}{first_row})',dark_red,columns["pdl"]),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_high}{first_row}),${ltp}{first_row}>=${week_high}{first_row})',dark_green,columns["week_high"]),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_low}{first_row}),${ltp}{first_row}<=${week_low}{first_row})',dark_red,columns["week_low"]),
+            (f'=${status_col}{first_row}="BREAKOUT"',dark_green,columns["status"]),
+            (f'=${status_col}{first_row}="BREAKDOWN"',dark_red,columns["status"]),
+        ]
+        for formula,color,col_start in specs:
+            add_rule(formula,color,col_start,col_start+1,row_start,row_end)
+
+    if dashboard_row_map_index:
+        first_index_row=min(dashboard_row_map_index.values())
+        last_index_row=max(dashboard_row_map_index.values())
+        index_specs=[
+            (f'=AND(ISNUMBER($F{first_index_row}),ISNUMBER($B{first_index_row}),$F{first_index_row}>=$B{first_index_row})',dark_green,1),
+            (f'=AND(ISNUMBER($F{first_index_row}),ISNUMBER($C{first_index_row}),$F{first_index_row}<=$C{first_index_row})',dark_red,2),
+            (f'=AND(ISNUMBER($F{first_index_row}),ISNUMBER($D{first_index_row}),$F{first_index_row}>=$D{first_index_row})',dark_green,3),
+            (f'=AND(ISNUMBER($F{first_index_row}),ISNUMBER($E{first_index_row}),$F{first_index_row}<=$E{first_index_row})',dark_red,4),
+            (f'=$I{first_index_row}="BREAKOUT"',dark_green,8),
+            (f'=$I{first_index_row}="BREAKDOWN"',dark_red,8),
+        ]
+        for formula,color,col_start in index_specs:
+            add_rule(formula,color,col_start,col_start+1,first_index_row-1,last_index_row)
+    owned_formulas={rule[0] for rule in rules}
+    # Remove rules left by the previous BREAKOUT-sheet layout. Those rules
+    # referenced the old row-3 table and were duplicated on every old run,
+    # causing stale colors to overlap the new dashboard.
+    legacy_layout_formulas={
+        '=$S3="BREAKDOWN"', '=$S3="BREAKOUT"',
+        '=$R3<$Q3', '=$R3>$P3', '=$R3<$O3', '=$R3>$N3',
+        '=$I3="BREAKDOWN"', '=$I3="BREAKOUT"',
+        '=$H3<$G3', '=$H3>$F3', '=$H3<$E3', '=$H3>$D3',
+    }
+    previous_pd_formulas={
+        '=AND($G12<>"",$C12<>"",$G12>=$C12)',
+        '=AND($G12<>"",$D12<>"",$G12<=$D12)',
+        '=AND($R12<>"",$N12<>"",$R12>=$N12)',
+        '=AND($R12<>"",$O12<>"",$R12<=$O12)',
+    }
+    def is_owned_color_formula(value):
+        # Panel titles can move when the number of breakout rows changes, so
+        # match our formula shapes as well as this run's exact formulas.
+        if value in owned_formulas or value in legacy_layout_formulas or value in previous_pd_formulas:
+            return True
+        if re.fullmatch(r'=\$(?:D|O)\d+="PD[HL] BREAK"', value):
+            return True
+        if re.fullmatch(r'=\$(?:J|U|I|S)\d+="BREAK(?:OUT|DOWN)"', value):
+            return True
+        if re.match(r'^=AND\(ISNUMBER\(\$(?:G|R|F)\d+\)', value):
+            return True
+        if re.match(r'^=AND\(\$(?:G|R)\d+<>""', value):
+            return True
+        if (value.startswith('=AND($F') and (">=$B" in value or "<=$C" in value)):
+            return True
+        return False
+    requests_list=[]
+    try:
+        metadata=sheet2.spreadsheet.fetch_sheet_metadata(params={"includeGridData":False,"fields":"sheets(properties(sheetId),conditionalFormats)"})
+        existing=[]
+        for ws in metadata.get("sheets",[]):
+            if ws.get("properties",{}).get("sheetId")==sheet2.id:
+                existing=ws.get("conditionalFormats",[])
+                break
+        old_indices=[]
+        for idx,rule in enumerate(existing):
+            condition=rule.get("booleanRule",{}).get("condition",{})
+            values={v.get("userEnteredValue","") for v in condition.get("values",[])}
+            if any(is_owned_color_formula(value) for value in values):
+                old_indices.append(idx)
+        requests_list.extend({"deleteConditionalFormatRule":{"sheetId":sheet2.id,"index":idx}} for idx in reversed(old_indices))
+    except Exception as exc:
+        print(f"PD COLOR RULE READ ERR {exc}")
+    for formula,color,col_start,col_end,row_start,row_end in rules:
+        requests_list.append({"addConditionalFormatRule":{"rule":{"ranges":[{"sheetId":sheet2.id,"startRowIndex":row_start,"endRowIndex":row_end,"startColumnIndex":col_start,"endColumnIndex":col_end}],"booleanRule":{"condition":{"type":"CUSTOM_FORMULA","values":[{"userEnteredValue":formula}]},"format":{"backgroundColor":color,"textFormat":{"foregroundColor":white,"bold":True}}}},"index":0}})
+    try:
+        sheet2.spreadsheet.batch_update({"requests":requests_list})
+    except Exception as exc:
+        print(f"PD COLOR APPLY ERR {exc}")
+
+def apply_main_index_colors():
+    if not row_map_index: return
+    first_row=min(row_map_index.values()); last_row=max(row_map_index.values())
+    dark_green={"red":0.0,"green":0.4,"blue":0.0}
+    dark_red={"red":0.5,"green":0.0,"blue":0.0}
+    white={"red":1,"green":1,"blue":1}
+    formulas=[
+        f'=AND(ISNUMBER($F{first_row}),ISNUMBER($B{first_row}),$F{first_row}>=$B{first_row})',
+        f'=AND(ISNUMBER($F{first_row}),ISNUMBER($C{first_row}),$F{first_row}<=$C{first_row})',
+        f'=AND(ISNUMBER($F{first_row}),ISNUMBER($D{first_row}),$F{first_row}>=$D{first_row})',
+        f'=AND(ISNUMBER($F{first_row}),ISNUMBER($E{first_row}),$F{first_row}<=$E{first_row})',
+        f'=$I{first_row}="BREAKOUT"',
+        f'=$I{first_row}="BREAKDOWN"',
+    ]
+    requests_list=[]
+    try:
+        metadata=sheet.spreadsheet.fetch_sheet_metadata(params={"includeGridData":False,"fields":"sheets(properties(sheetId),conditionalFormats)"})
+        rules=[]
+        for ws in metadata.get("sheets",[]):
+            if ws.get("properties",{}).get("sheetId")==sheet.id:
+                rules=ws.get("conditionalFormats",[]); break
+        old_indices=[]
+        for idx,rule in enumerate(rules):
+            condition=rule.get("booleanRule",{}).get("condition",{})
+            vals={v.get("userEnteredValue","") for v in condition.get("values",[])}
+            ranges=rule.get("ranges",[])
+            overlaps_index=any(rg.get("startRowIndex",0)<last_row and rg.get("endRowIndex",0)>first_row-1 for rg in ranges)
+            index_columns={rg.get("startColumnIndex") for rg in ranges}
+            old_main_index_rule=overlaps_index and (
+                (bool(index_columns & {1,2,3,4}) and any("$F" in v for v in vals))
+                or (8 in index_columns and (bool(vals & {"BREAKOUT","BREAKDOWN"}) or any("$I" in v for v in vals)))
+            )
+            if old_main_index_rule or vals & set(formulas):
+                old_indices.append(idx)
+        requests_list.extend({"deleteConditionalFormatRule":{"sheetId":sheet.id,"index":idx}} for idx in reversed(old_indices))
+    except Exception as exc:
+        print(f"MAIN INDEX COLOR RULE READ ERR {exc}")
+    color_specs=[(formulas[0],dark_green,1),(formulas[1],dark_red,2),(formulas[2],dark_green,3),(formulas[3],dark_red,4),(formulas[4],dark_green,8),(formulas[5],dark_red,8)]
+    for formula,color,col_start in color_specs:
+        requests_list.append({"addConditionalFormatRule":{"rule":{"ranges":[{"sheetId":sheet.id,"startRowIndex":first_row-1,"endRowIndex":last_row,"startColumnIndex":col_start,"endColumnIndex":col_start+1}],"booleanRule":{"condition":{"type":"CUSTOM_FORMULA","values":[{"userEnteredValue":formula}]},"format":{"backgroundColor":color,"textFormat":{"foregroundColor":white,"bold":True}}}},"index":0}})
+    try: sheet.spreadsheet.batch_update({"requests":requests_list})
+    except Exception as exc: print(f"MAIN INDEX COLOR APPLY ERR {exc}")
+
+def write_dashboard():
+    summary=build_top_summary()
+    rows=build_dashboard()
+    sheet2.batch_clear(["A1:V5000"])
+    sheet2.update(values=summary,range_name="A1")
+    if rows: sheet2.update(values=rows,range_name="A10")
+    apply_pd_colors()
+
+print("Writing main sheet and Sheet 2 dashboard...")
+try:
+    main_rows=build_rows()
+    sheet.batch_clear(["A4:Z5000"])
+    sheet.update(values=main_rows,range_name="A4")
+    sheet.update(values=[[datetime.now().strftime("%H:%M:%S")]],range_name="C3")
+    apply_main_index_colors()
+    write_dashboard()
+except Exception as e:
+    print(f"SHEET WRITE ERR {e}")
+    raise
 print(f"DONE - Index {len(index_data)} Option {len(option_data)}")
 
 import upstox_client
 configuration = upstox_client.Configuration(); configuration.access_token = UPSTOX_ACCESS_TOKEN
 api_client = upstox_client.ApiClient(configuration)
-all_keys = index_keys + option_keys
+all_keys = index_keys + stock_keys + option_keys
 if not all_keys:
     print("NO KEYS"); raise SystemExit(1)
 
 streamer = upstox_client.MarketDataStreamerV3(api_client=api_client, instrumentKeys=all_keys, mode="full")
 pending={}; lock=threading.Lock()
+dashboard_signature=[tuple(sorted((v["underlying"],v["otype"],get_status(v)) for v in option_data.values()))]
 
 def on_message(msg):
     feeds=msg.get("feeds",{})
@@ -421,48 +679,69 @@ streamer.on("open", on_open); streamer.on("message", on_message); streamer.conne
 
 def updater():
     loop=0
-    last_sheet_update=time.monotonic()
     while True:
-        time.sleep(0.25)
+        time.sleep(2)
         with lock:
-            for ikey, ltp in list(pending.items()):
+            for ikey,ltp in list(pending.items()):
+                if ikey in stock_underlying_data:
+                    stock=stock_underlying_data[ikey]
+                    stock["ltp"]=float(ltp)
+                    stock["change"]=(stock["ltp"]-stock["prev_close"])/stock["prev_close"]*100 if stock.get("prev_close",0)>0 else 0
                 if ikey in option_data:
-                    prev=option_data[ikey]["prev_close"]
-                    option_data[ikey]["ltp"]=float(ltp)
-                    if prev>0: option_data[ikey]["change"]=(ltp-prev)/prev*100
-                    if option_data[ikey]["wh"]>0: option_data[ikey]["dist"]=ltp/option_data[ikey]["wh"]*100
+                    it=option_data[ikey]; old_status=get_status(it); prev=it["prev_close"]
+                    it["ltp"]=float(ltp)
+                    if prev>0: it["change"]=(ltp-prev)/prev*100
+                    if it["wh"]>0: it["dist"]=ltp/it["wh"]*100
+                    update_break_time(it,old_status)
                 if ikey in index_data:
-                    prev=index_data[ikey]["prev_close"]
-                    index_data[ikey]["ltp"]=float(ltp)
-                    if prev>0: index_data[ikey]["change"]=(ltp-prev)/prev*100
-                    if index_data[ikey]["wh"]>0: index_data[ikey]["dist"]=ltp/index_data[ikey]["wh"]*100
+                    it=index_data[ikey]; prev=it["prev_close"]
+                    it["ltp"]=float(ltp)
+                    if prev>0: it["change"]=(ltp-prev)/prev*100
+                    if it["wh"]>0: it["dist"]=ltp/it["wh"]*100
             pending.clear()
             if loop % 5 == 0:
                 try:
-                    fetch_ltp(option_keys, option_data)
-                    fetch_ltp(index_keys, index_data)
+                    status_before={k:get_status(v) for k,v in option_data.items()}
+                    fetch_ltp(option_keys,option_data)
+                    for k,it in option_data.items(): update_break_time(it,status_before.get(k,""))
+                    fetch_ltp(index_keys,index_data)
                 except: pass
-            if time.monotonic()-last_sheet_update >= 5:
-                batch=[]
-                batch.append({"range": f"C3", "values": [[datetime.now().strftime("%H:%M:%S")]]})
-                for sym, rnum in row_map_index.items():
-                    for k,v in index_data.items():
-                        if v["symbol"]==sym and v["ltp"]>0:
-                            batch.append({"range": f"B{rnum}:I{rnum}", "values": [[v["pdh"], v["pdl"], v["wh"], v["wl"], v["ltp"], f"{v['change']:.2f}%", f"{v['dist']:.1f}%", get_status(v)]]})
-                for stock, rnum in row_map_stock.items():
-                    ce=None; pe=None
-                    for k,v in option_data.items():
-                        if v["underlying"]==stock:
-                            if v["otype"]=="CE": ce=v
-                            if v["otype"]=="PE": pe=v
-                    if ce and ce["ltp"]>0:
-                        batch.append({"range": f"G{rnum}:J{rnum}", "values": [[ce["ltp"], f"{ce['change']:.2f}%", f"{ce['dist']:.1f}%", get_status(ce)]]})
-                    if pe and pe["ltp"]>0:
-                        batch.append({"range": f"R{rnum}:U{rnum}", "values": [[pe["ltp"], f"{pe['change']:.2f}%", f"{pe['dist']:.1f}%", get_status(pe)]]})
-                if batch:
-                    try: sheet.batch_update(batch)
-                    except Exception as exc: print(f"Google Sheet update error: {exc}")
-                last_sheet_update += 5
+            current_signature=tuple(sorted((v["underlying"],v["otype"],get_status(v)) for v in option_data.values()))
+            if current_signature!=dashboard_signature[0]:
+                try:
+                    write_dashboard()
+                    dashboard_signature[0]=current_signature
+                except Exception as e: print(f"DASHBOARD REFRESH ERR {e}")
+            main_batch=[{"range":"C3","values":[[datetime.now().strftime("%H:%M:%S")]]}]
+            for sym,rnum in row_map_index.items():
+                for it in index_data.values():
+                    if it["symbol"]==sym and it["ltp"]>0:
+                        main_batch.append({"range":f"B{rnum}:I{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)]]})
+                        break
+            for stock,rnum in row_map_stock.items():
+                ce=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]=="CE"),None)
+                pe=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]=="PE"),None)
+                if ce and ce["ltp"]>0: main_batch.append({"range":f"G{rnum}:J{rnum}","values":[[ce["ltp"],f"{ce['change']:.2f}%",f"{ce['dist']:.1f}%",get_status(ce)]]})
+                if pe and pe["ltp"]>0: main_batch.append({"range":f"R{rnum}:U{rnum}","values":[[pe["ltp"],f"{pe['change']:.2f}%",f"{pe['dist']:.1f}%",get_status(pe)]]})
+            dash_batch=[{"range":"A1:V7","values":build_top_summary()}]
+            for sym,rnum in dashboard_row_map_index.items():
+                for it in index_data.values():
+                    if it["symbol"]==sym and it["ltp"]>0:
+                        dash_batch.append({"range":f"B{rnum}:I{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)]]})
+                        break
+            for (stock,otype),rnum in row_map_option.items():
+                it=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]==otype),None)
+                if it and it["ltp"]>0:
+                    start_col="G" if otype=="CE" else "R"; end_col="K" if otype=="CE" else "V"
+                    dash_batch.append({"range":f"{start_col}{rnum}:{end_col}{rnum}","values":[[it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")]]})
+            def spreadsheet_ranges(worksheet, updates):
+                title=worksheet.title.replace("'", "''")
+                return [{"range":f"'{title}'!{item['range']}","values":item["values"]} for item in updates]
+            try:
+                combined_updates=spreadsheet_ranges(sheet,main_batch)+spreadsheet_ranges(sheet2,dash_batch)
+                sh.values_batch_update({"valueInputOption":"RAW","data":combined_updates})
+            except Exception as e:
+                print(f"Google Sheet update error: {e}")
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
