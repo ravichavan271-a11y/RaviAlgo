@@ -1,6 +1,5 @@
-import gzip, io, time, threading, os, re, json, html
+import gzip, io, time, threading, os, re, json
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
@@ -11,41 +10,9 @@ print("V42 - OPEN BASED ATM + OCT EXPIRY ROLLOVER FIX")
 
 SPREADSHEET_NAME = os.getenv("OPTION_SPREADSHEET_NAME", "option Dsheet")
 TOKEN_SPREADSHEET_NAME = os.getenv("TOKEN_SPREADSHEET_NAME", "Dsheet")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 GOOGLE_SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 gc = None
-_telegram_missing_warned = False
-IST = ZoneInfo("Asia/Kolkata")
-
-def send_breakout_telegram_alerts(events):
-    """Send a grouped Telegram message for newly entered breakout/breakdown states."""
-    global _telegram_missing_warned
-    if not events:
-        return
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        if not _telegram_missing_warned:
-            print("Telegram breakout alerts disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.", flush=True)
-            _telegram_missing_warned = True
-        return
-    stamp=datetime.now(IST).strftime("%H:%M:%S IST")
-    message="🚨 <b>RENDER OPTION DSheet — BREAKOUT / BREAKDOWN</b>\n" + "\n".join(events[:45])
-    if len(events)>45:
-        message+=f"\n… and {len(events)-45} more signals"
-    message+=f"\n\n{stamp}"
-    try:
-        response=requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id":TELEGRAM_CHAT_ID,"text":message,"parse_mode":"HTML","disable_web_page_preview":True},
-            timeout=12,
-        )
-        if response.status_code==200:
-            print(f"Telegram breakout alert sent ({len(events)} signal(s)).", flush=True)
-        else:
-            print(f"Telegram breakout alert failed: HTTP {response.status_code}; {response.text[:250]}", flush=True)
-    except requests.RequestException as exc:
-        print(f"Telegram breakout alert request failed: {type(exc).__name__}", flush=True)
 
 def get_google_client():
     if SERVICE_ACCOUNT_JSON:
@@ -757,18 +724,9 @@ streamer.on("open", on_open); streamer.on("message", on_message); streamer.conne
 
 def updater():
     loop=0
-    initial_alert_scan=[True]
     while True:
         time.sleep(5)
-        telegram_events=[]
         with lock:
-            if initial_alert_scan[0]:
-                previous_index_status={k:"" for k in index_data}
-                previous_option_status={k:"" for k in option_data}
-                initial_alert_scan[0]=False
-            else:
-                previous_index_status={k:get_status(v) for k,v in index_data.items()}
-                previous_option_status={k:get_status(v) for k,v in option_data.items()}
             for ikey,ltp in list(pending.items()):
                 if ikey in stock_underlying_data:
                     stock=stock_underlying_data[ikey]
@@ -799,18 +757,6 @@ def updater():
                     write_dashboard()
                     dashboard_signature[0]=current_signature
                 except Exception as e: print(f"DASHBOARD REFRESH ERR {e}")
-            for ikey,it in index_data.items():
-                status=get_status(it)
-                if status in ("BREAKOUT","BREAKDOWN") and status!=previous_index_status.get(ikey,"") and it.get("ltp",0)>0:
-                    icon="🟢" if status=="BREAKOUT" else "🔴"
-                    label=f"INDEX {it['symbol']}"
-                    telegram_events.append(f"{icon} <b>{html.escape(label)}</b> — {status} | LTP ₹{it['ltp']:.2f} | {it.get('change',0):+.2f}%")
-            for ikey,it in option_data.items():
-                status=get_status(it)
-                if status in ("BREAKOUT","BREAKDOWN") and status!=previous_option_status.get(ikey,"") and it.get("ltp",0)>0:
-                    icon="🟢" if status=="BREAKOUT" else "🔴"
-                    label=f"{it['underlying']} {it['otype']} {it['strike']}"
-                    telegram_events.append(f"{icon} <b>{html.escape(label)}</b> — {status} | LTP ₹{it['ltp']:.2f} | {it.get('change',0):+.2f}%")
             main_batch=[{"range":"C3","values":[[datetime.now().strftime("%H:%M:%S")]]}]
             for sym,rnum in row_map_index.items():
                 for it in index_data.values():
@@ -841,8 +787,6 @@ def updater():
                 sh.values_batch_update({"valueInputOption":"RAW","data":combined_updates})
             except Exception as e:
                 print(f"Google Sheet update error: {e}")
-        if telegram_events:
-            send_breakout_telegram_alerts(telegram_events)
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
