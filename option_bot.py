@@ -176,7 +176,7 @@ index_data={}; index_keys=[]
 for idx in INDEX_LIST:
     k=mp.get(idx)
     if k:
-        index_data[k]={"symbol":idx,"pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"change":0,"dist":0,"break_time":""}
+        index_data[k]={"symbol":idx,"pdh":0,"pdl":0,"wh":0,"wl":0,"ltp":0,"prev_close":0,"change":0,"dist":0,"break_ts":None,"break_time":""}
         index_keys.append(k)
 
 stock_underlying_data={}; stock_keys=[]
@@ -373,18 +373,18 @@ def get_status(it):
 
 def update_break_time(it, old_status):
     new_status=get_status(it)
-    if new_status=="BREAKOUT" and old_status!="BREAKOUT":
+    if new_status in ("BREAKOUT","BREAKDOWN") and old_status!=new_status:
         now=datetime.now()
         it["break_ts"]=now
         it["break_time"]=now.strftime("%H:%M:%S")
-    elif new_status!="BREAKOUT":
+    elif not new_status:
         it["break_ts"]=None
         it["break_time"]=""
 
 # If the script starts while a contract is already above its weekly high,
 # use startup time as the earliest known breakout time for this run.
-for _it in option_data.values():
-    if get_status(_it)=="BREAKOUT":
+for _it in list(option_data.values())+list(index_data.values()):
+    if get_status(_it) in ("BREAKOUT","BREAKDOWN"):
         _now=datetime.now()
         _it["break_ts"]=_now
         _it["break_time"]=_now.strftime("%H:%M:%S")
@@ -425,38 +425,37 @@ row_map_index={}; row_map_stock={}; dashboard_row_map_index={}; row_map_option={
 DASHBOARD_START_ROW=17
 
 def build_top_summary():
-    """Top stock and index gainers/losers, ranked by spot change."""
+    """Stock and index rankings with the same live fields as the main dashboard."""
     grid=[[""]*22 for _ in range(14)]
     grid[0][0]="TOP 5 GAINERS"
     grid[0][11]="TOP 5 LOSERS"
     grid[0][20]="Updated"
     grid[0][21]=datetime.now().strftime("%H:%M:%S")
-    headers=["Stock","Spot LTP","% Change","PDH/PDL","ATM Option","Option %"]
-    grid[1][0:6]=headers
-    grid[1][11:17]=headers
+    stock_headers=["Stock","Strike","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","DIST%","STATUS","BREAK TIME"]
+    grid[1][0:11]=stock_headers
+    grid[1][11:22]=stock_headers
     candidates=[v for v in stock_underlying_data.values() if v.get("prev_close",0)>0 and v.get("ltp",0)>0]
     gainers=sorted((v for v in candidates if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
     losers=sorted((v for v in candidates if v["change"]<0),key=lambda x:x["change"])[:5]
     def make_row(it,otype):
-        signal="PDH BREAK" if it.get("pdh",0)>0 and it["ltp"]>it["pdh"] else ("PDL BREAK" if it.get("pdl",0)>0 and it["ltp"]<it["pdl"] else "NO BREAK")
         opt=next((v for v in option_data.values() if v["underlying"]==it["symbol"] and v["otype"]==otype),None)
-        return [it["symbol"],it["ltp"],f"{it['change']:+.2f}%",signal,f"{otype} {opt['strike']}" if opt else "",f"{opt['change']:+.2f}%" if opt else ""]
-    for i,it in enumerate(gainers): grid[i+2][0:6]=make_row(it,"CE")
-    for i,it in enumerate(losers): grid[i+2][11:17]=make_row(it,"PE")
+        if not opt:
+            return [it["symbol"]]+[""]*10
+        return [it["symbol"],opt["strike"],opt["pdh"],opt["pdl"],opt["wh"],opt["wl"],opt["ltp"],f"{opt['change']:+.2f}%",f"{opt['dist']:.1f}%",get_status(opt),opt.get("break_time","")]
+    for i,it in enumerate(gainers): grid[i+2][0:11]=make_row(it,"CE")
+    for i,it in enumerate(losers): grid[i+2][11:22]=make_row(it,"PE")
     grid[7][0]="TOP 5 INDEX GAINERS"
     grid[7][11]="TOP 5 INDEX LOSERS"
-    index_headers=["Index","Spot LTP","% Change","PDH/PDL","WEEK H/L","Status"]
-    grid[8][0:6]=index_headers
-    grid[8][11:17]=index_headers
+    index_headers=["Index","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","DIST%","STATUS","BREAK TIME"]
+    grid[8][0:10]=index_headers
+    grid[8][11:21]=index_headers
     indices=[v for v in index_data.values() if v.get("prev_close",0)>0 and v.get("ltp",0)>0]
     index_gainers=sorted((v for v in indices if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
     index_losers=sorted((v for v in indices if v["change"]<0),key=lambda x:x["change"])[:5]
     def make_index_row(it):
-        signal="PDH BREAK" if it.get("pdh",0)>0 and it["ltp"]>it["pdh"] else ("PDL BREAK" if it.get("pdl",0)>0 and it["ltp"]<it["pdl"] else "NO BREAK")
-        week=f"{it.get('wh',0):.2f}/{it.get('wl',0):.2f}"
-        return [it["symbol"],it["ltp"],f"{it['change']:+.2f}%",signal,week,get_status(it) or "-"]
-    for i,it in enumerate(index_gainers): grid[i+9][0:6]=make_index_row(it)
-    for i,it in enumerate(index_losers): grid[i+9][11:17]=make_index_row(it)
+        return [it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:+.2f}%",f"{it['dist']:.1f}%",get_status(it) or "-",it.get("break_time","")]
+    for i,it in enumerate(index_gainers): grid[i+9][0:10]=make_index_row(it)
+    for i,it in enumerate(index_losers): grid[i+9][11:21]=make_index_row(it)
     return grid
 
 def build_dashboard():
@@ -495,10 +494,10 @@ def build_dashboard():
     index_title=breakdown_title+2+max(ce_bd,pe_bd)
     option_panel_end_row=index_title+9 # exclusive zero-based row, before index table; dashboard starts at row 10
     put(index_title,0,["=== INDEX ==="])
-    put(index_title+1,0,["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP (Spot)","CHANGE %","DIST%","STATUS"])
+    put(index_title+1,0,["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP (Spot)","CHANGE %","DIST%","STATUS","BREAK TIME"])
     for offset,it in enumerate(sorted(index_data.values(),key=lambda x:x["change"],reverse=True),2):
         row_idx=index_title+offset
-        put(row_idx,0,[it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)])
+        put(row_idx,0,[it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")])
         dashboard_row_map_index[it["symbol"]]=row_idx+DASHBOARD_START_ROW
     return [row+[""]*(22-len(row)) for row in grid]
 
@@ -511,23 +510,42 @@ def apply_pd_colors():
         if row_end>row_start:
             rules.append((formula,color,col_start,col_end,row_start,row_end))
 
-    # Top 5 signal cells.
-    for col,col_index in [("D",3),("O",14)]:
-        add_rule(f'=${col}3="PDH BREAK"',dark_green,col_index,col_index+1,2,7)
-        add_rule(f'=${col}3="PDL BREAK"',dark_red,col_index,col_index+1,2,7)
-        add_rule(f'=${col}10="PDH BREAK"',dark_green,col_index,col_index+1,9,14)
-        add_rule(f'=${col}10="PDL BREAK"',dark_red,col_index,col_index+1,9,14)
+    # Stock gainers / losers: PD and weekly levels, trend, and status.
+    stock_panels=[
+        ("G","C","D","E","F","H","J",2,7),
+        ("R","N","O","P","Q","S","U",2,7),
+    ]
+    for ltp,pdh,pdl,week_high,week_low,pct,status,row_start,row_end in stock_panels:
+        first_row=row_start+1
+        specs=[
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdh}{first_row}),${ltp}{first_row}>=${pdh}{first_row})',dark_green,ord(pdh)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdl}{first_row}),${ltp}{first_row}<=${pdl}{first_row})',dark_red,ord(pdl)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_high}{first_row}),${ltp}{first_row}>=${week_high}{first_row})',dark_green,ord(week_high)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_low}{first_row}),${ltp}{first_row}<=${week_low}{first_row})',dark_red,ord(week_low)-ord("A")),
+            (f'=IFERROR(VALUE(SUBSTITUTE(${pct}{first_row},"%","")),0)>0',dark_green,ord(pct)-ord("A")),
+            (f'=IFERROR(VALUE(SUBSTITUTE(${pct}{first_row},"%","")),0)<0',dark_red,ord(pct)-ord("A")),
+            (f'=${status}{first_row}="BREAKOUT"',dark_green,ord(status)-ord("A")),
+            (f'=${status}{first_row}="BREAKDOWN"',dark_red,ord(status)-ord("A")),
+        ]
+        for formula,color,col_start in specs:
+            add_rule(formula,color,col_start,col_start+1,row_start,row_end)
 
-    # Rank tables: positive change is green, negative change is red.
-    for pct_col,option_pct_col in [("C", "F"), ("N", "Q")]:
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}3,"%","")),0)>0',dark_green,ord(pct_col)-ord("A"),ord(pct_col)-ord("A")+1,2,7)
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}3,"%","")),0)<0',dark_red,ord(pct_col)-ord("A"),ord(pct_col)-ord("A")+1,2,7)
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${option_pct_col}3,"%","")),0)>0',dark_green,ord(option_pct_col)-ord("A"),ord(option_pct_col)-ord("A")+1,2,7)
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${option_pct_col}3,"%","")),0)<0',dark_red,ord(option_pct_col)-ord("A"),ord(option_pct_col)-ord("A")+1,2,7)
-    for pct_col in ("C", "N"):
-        col_index=ord(pct_col)-ord("A")
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}10,"%","")),0)>0',dark_green,col_index,col_index+1,9,14)
-        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}10,"%","")),0)<0',dark_red,col_index,col_index+1,9,14)
+    # Index gainers / losers have no strike or option break time.
+    index_panels=[("F","B","C","D","E","G","I",9,14),("Q","M","N","O","P","R","T",9,14)]
+    for ltp,pdh,pdl,week_high,week_low,pct,status,row_start,row_end in index_panels:
+        first_row=row_start+1
+        specs=[
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdh}{first_row}),${ltp}{first_row}>=${pdh}{first_row})',dark_green,ord(pdh)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${pdl}{first_row}),${ltp}{first_row}<=${pdl}{first_row})',dark_red,ord(pdl)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_high}{first_row}),${ltp}{first_row}>=${week_high}{first_row})',dark_green,ord(week_high)-ord("A")),
+            (f'=AND(ISNUMBER(${ltp}{first_row}),ISNUMBER(${week_low}{first_row}),${ltp}{first_row}<=${week_low}{first_row})',dark_red,ord(week_low)-ord("A")),
+            (f'=IFERROR(VALUE(SUBSTITUTE(${pct}{first_row},"%","")),0)>0',dark_green,ord(pct)-ord("A")),
+            (f'=IFERROR(VALUE(SUBSTITUTE(${pct}{first_row},"%","")),0)<0',dark_red,ord(pct)-ord("A")),
+            (f'=${status}{first_row}="BREAKOUT"',dark_green,ord(status)-ord("A")),
+            (f'=${status}{first_row}="BREAKDOWN"',dark_red,ord(status)-ord("A")),
+        ]
+        for formula,color,col_start in specs:
+            add_rule(formula,color,col_start,col_start+1,row_start,row_end)
 
     # Apply option colors only to actual data rows in each panel, never to
     # section titles, headers, or blank rows between CE/PE panels.
@@ -584,6 +602,8 @@ def apply_pd_colors():
         # match our formula shapes as well as this run's exact formulas.
         if value in owned_formulas or value in legacy_layout_formulas or value in previous_pd_formulas:
             return True
+        if re.fullmatch(r'=IFERROR\(VALUE\(SUBSTITUTE\(\$(?:C|F|N|Q)\d+,"%",""\)\),0\)[<>]0', value):
+            return True
         if re.fullmatch(r'=\$(?:D|O)\d+="PD[HL] BREAK"', value):
             return True
         if re.fullmatch(r'=\$(?:J|U|I|S)\d+="BREAK(?:OUT|DOWN)"', value):
@@ -596,6 +616,9 @@ def apply_pd_colors():
             return True
         return False
     requests_list=[]
+    blue={"red":0.04,"green":0.24,"blue":0.72}
+    for start_col,end_col,row in [(0,11,1),(11,22,1),(0,10,8),(11,21,8)]:
+        requests_list.append({"repeatCell":{"range":{"sheetId":sheet2.id,"startRowIndex":row,"endRowIndex":row+1,"startColumnIndex":start_col,"endColumnIndex":end_col},"cell":{"userEnteredFormat":{"backgroundColor":blue,"textFormat":{"foregroundColor":white,"bold":True},"horizontalAlignment":"CENTER","wrapStrategy":"WRAP"}},"fields":"userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy)"}})
     try:
         metadata=sheet2.spreadsheet.fetch_sheet_metadata(params={"includeGridData":False,"fields":"sheets(properties(sheetId),conditionalFormats)"})
         existing=[]
@@ -746,17 +769,20 @@ def updater():
                     if it["wh"]>0: it["dist"]=ltp/it["wh"]*100
                     update_break_time(it,old_status)
                 if ikey in index_data:
-                    it=index_data[ikey]; prev=it["prev_close"]
+                    it=index_data[ikey]; old_status=get_status(it); prev=it["prev_close"]
                     it["ltp"]=float(ltp)
                     if prev>0: it["change"]=(ltp-prev)/prev*100
                     if it["wh"]>0: it["dist"]=ltp/it["wh"]*100
+                    update_break_time(it,old_status)
             pending.clear()
             if loop % 5 == 0:
                 try:
                     status_before={k:get_status(v) for k,v in option_data.items()}
+                    index_status_before={k:get_status(v) for k,v in index_data.items()}
                     fetch_ltp(option_keys,option_data)
                     for k,it in option_data.items(): update_break_time(it,status_before.get(k,""))
                     fetch_ltp(index_keys,index_data)
+                    for k,it in index_data.items(): update_break_time(it,index_status_before.get(k,""))
                 except: pass
             current_signature=tuple(sorted((v["underlying"],v["otype"],get_status(v)) for v in option_data.values()))
             if current_signature!=dashboard_signature[0]:
@@ -779,7 +805,7 @@ def updater():
             for sym,rnum in dashboard_row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
-                        dash_batch.append({"range":f"B{rnum}:I{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)]]})
+                        dash_batch.append({"range":f"B{rnum}:J{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")]]})
                         break
             for (stock,otype),rnum in row_map_option.items():
                 it=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]==otype),None)
