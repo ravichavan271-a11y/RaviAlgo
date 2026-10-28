@@ -268,8 +268,15 @@ with ThreadPoolExecutor(max_workers=10) as ex:
             stock_underlying_data[k]["pdh"]=float(candles[0][2])
             stock_underlying_data[k]["pdl"]=float(candles[0][3])
             stock_underlying_data[k]["prev_close"]=float(candles[0][4])
+stock_close_fallbacks=0
 for it in stock_underlying_data.values():
+    # The instrument master carries the prior close. Use it when the daily
+    # candle endpoint has no row, so live stock rankings do not disappear.
+    if it["prev_close"]<=0 and it.get("csv",0)>0:
+        it["prev_close"]=float(it["csv"])
+        stock_close_fallbacks+=1
     it["change"]=(it["ltp"]-it["prev_close"])/it["prev_close"]*100 if it["prev_close"]>0 else 0
+print(f"STOCK PREV-CLOSE CSV FALLBACK: {stock_close_fallbacks}")
 
 # Weekly WH/WL
 with ThreadPoolExecutor(max_workers=10) as ex:
