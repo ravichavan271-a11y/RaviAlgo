@@ -415,10 +415,11 @@ def build_rows():
 
 
 row_map_index={}; row_map_stock={}; dashboard_row_map_index={}; row_map_option={}; option_panel_end_row=5000; option_panel_row_ranges={}
+DASHBOARD_START_ROW=17
 
 def build_top_summary():
-    """Top five underlying-stock gainers and losers, ranked by spot change."""
-    grid=[[""]*22 for _ in range(7)]
+    """Top stock and index gainers/losers, ranked by spot change."""
+    grid=[[""]*22 for _ in range(14)]
     grid[0][0]="TOP 5 GAINERS"
     grid[0][11]="TOP 5 LOSERS"
     grid[0][20]="Updated"
@@ -435,6 +436,20 @@ def build_top_summary():
         return [it["symbol"],it["ltp"],f"{it['change']:+.2f}%",signal,f"{otype} {opt['strike']}" if opt else "",f"{opt['change']:+.2f}%" if opt else ""]
     for i,it in enumerate(gainers): grid[i+2][0:6]=make_row(it,"CE")
     for i,it in enumerate(losers): grid[i+2][11:17]=make_row(it,"PE")
+    grid[7][0]="TOP 5 INDEX GAINERS"
+    grid[7][11]="TOP 5 INDEX LOSERS"
+    index_headers=["Index","Spot LTP","% Change","PDH/PDL","WEEK H/L","Status"]
+    grid[8][0:6]=index_headers
+    grid[8][11:17]=index_headers
+    indices=[v for v in index_data.values() if v.get("prev_close",0)>0 and v.get("ltp",0)>0]
+    index_gainers=sorted((v for v in indices if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
+    index_losers=sorted((v for v in indices if v["change"]<0),key=lambda x:x["change"])[:5]
+    def make_index_row(it):
+        signal="PDH BREAK" if it.get("pdh",0)>0 and it["ltp"]>it["pdh"] else ("PDL BREAK" if it.get("pdl",0)>0 and it["ltp"]<it["pdl"] else "NO BREAK")
+        week=f"{it.get('wh',0):.2f}/{it.get('wl',0):.2f}"
+        return [it["symbol"],it["ltp"],f"{it['change']:+.2f}%",signal,week,get_status(it) or "-"]
+    for i,it in enumerate(index_gainers): grid[i+9][0:6]=make_index_row(it)
+    for i,it in enumerate(index_losers): grid[i+9][11:17]=make_index_row(it)
     return grid
 
 def build_dashboard():
@@ -460,9 +475,9 @@ def build_dashboard():
         for offset,it in enumerate(items,1):
             row_idx=title_row+1+offset
             put(row_idx,col,[it["underlying"],it["strike"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",status,it.get("break_time","")])
-            row_map_option[(it["underlying"],otype)]=row_idx+10
+            row_map_option[(it["underlying"],otype)]=row_idx+DASHBOARD_START_ROW
         if items:
-            start_row_index=title_row+11
+            start_row_index=DASHBOARD_START_ROW+title_row+1
             option_panel_row_ranges[(otype,status)]=(start_row_index,start_row_index+len(items))
         return len(items)
     ce_bo=panel("CE BREAKOUT",0,"BREAKOUT","CE",0)
@@ -477,7 +492,7 @@ def build_dashboard():
     for offset,it in enumerate(sorted(index_data.values(),key=lambda x:x["change"],reverse=True),2):
         row_idx=index_title+offset
         put(row_idx,0,[it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)])
-        dashboard_row_map_index[it["symbol"]]=row_idx+10
+        dashboard_row_map_index[it["symbol"]]=row_idx+DASHBOARD_START_ROW
     return [row+[""]*(22-len(row)) for row in grid]
 
 def apply_pd_colors():
@@ -493,6 +508,19 @@ def apply_pd_colors():
     for col,col_index in [("D",3),("O",14)]:
         add_rule(f'=${col}3="PDH BREAK"',dark_green,col_index,col_index+1,2,7)
         add_rule(f'=${col}3="PDL BREAK"',dark_red,col_index,col_index+1,2,7)
+        add_rule(f'=${col}10="PDH BREAK"',dark_green,col_index,col_index+1,9,14)
+        add_rule(f'=${col}10="PDL BREAK"',dark_red,col_index,col_index+1,9,14)
+
+    # Rank tables: positive change is green, negative change is red.
+    for pct_col,option_pct_col in [("C", "F"), ("N", "Q")]:
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}3,"%","")),0)>0',dark_green,ord(pct_col)-ord("A"),ord(pct_col)-ord("A")+1,2,7)
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}3,"%","")),0)<0',dark_red,ord(pct_col)-ord("A"),ord(pct_col)-ord("A")+1,2,7)
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${option_pct_col}3,"%","")),0)>0',dark_green,ord(option_pct_col)-ord("A"),ord(option_pct_col)-ord("A")+1,2,7)
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${option_pct_col}3,"%","")),0)<0',dark_red,ord(option_pct_col)-ord("A"),ord(option_pct_col)-ord("A")+1,2,7)
+    for pct_col in ("C", "N"):
+        col_index=ord(pct_col)-ord("A")
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}10,"%","")),0)>0',dark_green,col_index,col_index+1,9,14)
+        add_rule(f'=IFERROR(VALUE(SUBSTITUTE(${pct_col}10,"%","")),0)<0',dark_red,col_index,col_index+1,9,14)
 
     # Apply option colors only to actual data rows in each panel, never to
     # section titles, headers, or blank rows between CE/PE panels.
@@ -627,12 +655,29 @@ def apply_main_index_colors():
     try: sheet.spreadsheet.batch_update({"requests":requests_list})
     except Exception as exc: print(f"MAIN INDEX COLOR APPLY ERR {exc}")
 
-def write_dashboard():
+dashboard_last_end_row=0
+
+def write_dashboard(clear_all=False):
+    """Refresh the BREAKOUT dashboard in place to avoid a visible blank flash."""
+    global dashboard_last_end_row
     summary=build_top_summary()
     rows=build_dashboard()
-    sheet2.batch_clear(["A1:V5000"])
-    sheet2.update(values=summary,range_name="A1")
-    if rows: sheet2.update(values=rows,range_name="A10")
+    end_row=DASHBOARD_START_ROW-1+len(rows)
+    title=sheet2.title.replace("'", "''")
+    if clear_all:
+        # Clear old content only once when the bot initializes the dashboard.
+        sheet2.batch_clear(["A1:V5000"])
+    updates=[
+        {"range":f"'{title}'!A1:V14","values":summary},
+    ]
+    if rows:
+        updates.append({"range":f"'{title}'!A{DASHBOARD_START_ROW}:V{end_row}","values":rows})
+    # Write summary and dashboard together. On live status changes, existing
+    # cells stay visible while values are replaced; only a stale tail is cleared.
+    sh.values_batch_update({"valueInputOption":"RAW","data":updates})
+    if not clear_all and dashboard_last_end_row and end_row<dashboard_last_end_row:
+        sheet2.batch_clear([f"A{end_row+1}:V{dashboard_last_end_row}"])
+    dashboard_last_end_row=end_row
     apply_pd_colors()
 
 print("Writing main sheet and Sheet 2 dashboard...")
@@ -642,7 +687,7 @@ try:
     sheet.update(values=main_rows,range_name="A4")
     sheet.update(values=[[datetime.now().strftime("%H:%M:%S")]],range_name="C3")
     apply_main_index_colors()
-    write_dashboard()
+    write_dashboard(clear_all=True)
 except Exception as e:
     print(f"SHEET WRITE ERR {e}")
     raise
@@ -680,7 +725,7 @@ streamer.on("open", on_open); streamer.on("message", on_message); streamer.conne
 def updater():
     loop=0
     while True:
-        time.sleep(2)
+        time.sleep(5)
         with lock:
             for ikey,ltp in list(pending.items()):
                 if ikey in stock_underlying_data:
@@ -723,7 +768,7 @@ def updater():
                 pe=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]=="PE"),None)
                 if ce and ce["ltp"]>0: main_batch.append({"range":f"G{rnum}:J{rnum}","values":[[ce["ltp"],f"{ce['change']:.2f}%",f"{ce['dist']:.1f}%",get_status(ce)]]})
                 if pe and pe["ltp"]>0: main_batch.append({"range":f"R{rnum}:U{rnum}","values":[[pe["ltp"],f"{pe['change']:.2f}%",f"{pe['dist']:.1f}%",get_status(pe)]]})
-            dash_batch=[{"range":"A1:V7","values":build_top_summary()}]
+            dash_batch=[{"range":"A1:V14","values":build_top_summary()}]
             for sym,rnum in dashboard_row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
@@ -746,4 +791,3 @@ def updater():
 
 threading.Thread(target=updater, daemon=True).start()
 while True: time.sleep(1)
-

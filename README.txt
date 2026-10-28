@@ -5,12 +5,14 @@ Fixed assignment (India time, Monday-Friday)
 - After login, Render validates the callback and saves the access token to Dsheet!B1.
 - 09:01-15:45: Silly runs only Upstock5.py; Render runs only option_bot.py.
 - Both scripts read the token from Dsheet!B1 and update their separate spreadsheets.
-- Both live Sheet refresh loops are configured for 5 seconds.
+- Silly updates Dsheet every 5 seconds. Render updates option Dsheet and its BREAKOUT dashboard every 5 seconds.
 - There is no daily server-selection button because each host has a fixed, different bot.
 
 Sheets
 - Upstock5.py uses SPREADSHEET_NAME (default: Dsheet) and writes its main/Breakout data.
 - option_bot.py uses OPTION_SPREADSHEET_NAME (default: option Dsheet) and reads TOKEN_SPREADSHEET_NAME (default: Dsheet).
+- option_bot.py writes the main table to Sheet1 and the live stock and index gainers/losers, CE/PE breakout/breakdown panels, and index table to the named BREAKOUT tab. It clears BREAKOUT!A1:V5000 once at startup; live panel changes write in place and clear only a stale trailing area.
+- Render sends both tabs' live values in one Sheets API batch every 5 seconds. Stock top gainers/losers appear first, index top gainers/losers directly below, followed by CE/PE breakout/breakdown panels. Positive changes and PDH break signals are green; negative changes and PDL break signals are red. The BREAKOUT dashboard is rewritten in place to avoid a full-tab blank flash.
 - The two bots do not write the same spreadsheet.
 
 Render
@@ -34,4 +36,3 @@ Verification
 - Python syntax compilation passes for the package.
 - A market-hours run is required to verify live Upstox data, Google Sheets writes, and memory.
 - Do not run either bot manually while the scheduled host processes are active.
-

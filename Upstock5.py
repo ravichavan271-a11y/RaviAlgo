@@ -231,6 +231,20 @@ def build_breakout(instrument_data):
     if not has: rows.append([]); rows.append(["SADHYA KUTLACH INDEX BREAKOUT/BREAKDOWN NAHI"])
     return rows
 
+_breakout_last_end_row=0
+
+def write_breakout_dashboard(sheet, instrument_data, reset=False):
+    """Update BREAKOUT values in place; clear the old full range only at startup."""
+    global _breakout_last_end_row
+    rows=build_breakout(instrument_data)
+    end_row=max(1,len(rows))
+    if reset:
+        sheet.batch_clear(["A1:O5000"])
+    sheet.update(values=rows,range_name=f"A1:O{end_row}",value_input_option="RAW")
+    if not reset and _breakout_last_end_row and end_row<_breakout_last_end_row:
+        sheet.batch_clear([f"A{end_row+1}:O{_breakout_last_end_row}"])
+    _breakout_last_end_row=end_row
+
 def apply_dark_colours(sheet):
     DARK_GREEN = {"red": 0.0, "green": 0.4, "blue": 0.0}
     DARK_RED = {"red": 0.5, "green": 0.0, "blue": 0.0}
@@ -401,9 +415,9 @@ def run_once():
 
     smooth_update_sheet(sheet, build_sorted(instrument_data))
     try:
-        breakout_sheet.clear()
-        breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
-    except: pass
+        write_breakout_dashboard(breakout_sheet,instrument_data,reset=True)
+    except Exception as e:
+        print(f"BREAKOUT initial write err: {e}")
     apply_dark_colours(sheet)
     try: apply_dark_colours(breakout_sheet)
     except: pass
@@ -508,9 +522,9 @@ if __name__ == "__main__":
                             send_breakout_alerts(instrument_data)
                             smooth_update_sheet(sheet, build_sorted(instrument_data))
                             try:
-                                breakout_sheet.clear()
-                                breakout_sheet.update(values=build_breakout(instrument_data), range_name="A1")
-                            except: pass
+                                write_breakout_dashboard(breakout_sheet,instrument_data)
+                            except Exception as e:
+                                print(f"BREAKOUT smooth update err: {e}")
                             status = "WS" if state["ws_connected"] else "REST"
                             print(f"🔄 Updated {datetime.now(IST).strftime('%H:%M:%S')} via {status} - Smooth No Blink")
                         except Exception as e:
@@ -525,4 +539,3 @@ if __name__ == "__main__":
             print(f"❌ Error: {e}")
             import traceback; traceback.print_exc()
             time.sleep(60)
-
