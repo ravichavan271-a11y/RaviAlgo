@@ -1,5 +1,6 @@
 import gzip, io, time, threading, os, re, json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
@@ -7,6 +8,8 @@ import requests, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 print("V42 - OPEN BASED ATM + OCT EXPIRY ROLLOVER FIX")
+
+IST = ZoneInfo("Asia/Kolkata")
 
 SPREADSHEET_NAME = os.getenv("OPTION_SPREADSHEET_NAME", "option Dsheet")
 TOKEN_SPREADSHEET_NAME = os.getenv("TOKEN_SPREADSHEET_NAME", "Dsheet")
@@ -103,8 +106,8 @@ try:
         raise RuntimeError("Sheet 2 worksheet was not found")
     weekly_from, weekly_to = find_weekly_range_top3(sh)
     if not weekly_from or not weekly_to:
-        weekly_to = datetime.now().strftime("%Y-%m-%d")
-        weekly_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        weekly_to = datetime.now(IST).strftime("%Y-%m-%d")
+        weekly_from = (datetime.now(IST) - timedelta(days=7)).strftime("%Y-%m-%d")
     print(f"Weekly {weekly_from} to {weekly_to}")
 except Exception as e:
     print(f"SHEET ERR {e}"); raise SystemExit(1)
@@ -248,7 +251,7 @@ print("Fetching LTP...")
 fetch_ltp(index_keys, index_data)
 fetch_ltp(stock_keys, stock_underlying_data)
 
-today = datetime.now().strftime("%Y-%m-%d")
+today = datetime.now(IST).strftime("%Y-%m-%d")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, today, today), stock_keys):
         if candles: stock_underlying_data[k]["open"]=float(candles[0][1])
@@ -257,7 +260,7 @@ for k,v in stock_underlying_data.items():
 
 pd_day=None
 for i in range(1,8):
-    d=(datetime.now()-timedelta(days=i)).strftime("%Y-%m-%d")
+    d=(datetime.now(IST)-timedelta(days=i)).strftime("%Y-%m-%d")
     if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
 
 print(f"PD Day: {pd_day}")
@@ -374,20 +377,19 @@ def get_status(it):
 def update_break_time(it, old_status):
     new_status=get_status(it)
     if new_status in ("BREAKOUT","BREAKDOWN") and old_status!=new_status:
-        now=datetime.now()
+        now=datetime.now(IST)
         it["break_ts"]=now
         it["break_time"]=now.strftime("%H:%M:%S")
     elif not new_status:
         it["break_ts"]=None
         it["break_time"]=""
 
-# If the script starts while a contract is already above its weekly high,
-# use startup time as the earliest known breakout time for this run.
+# A process restart cannot know when an already-active breakout first occurred.
+# Mark it honestly instead of reporting the restart time as the breakout time.
 for _it in list(option_data.values())+list(index_data.values()):
     if get_status(_it) in ("BREAKOUT","BREAKDOWN"):
-        _now=datetime.now()
-        _it["break_ts"]=_now
-        _it["break_time"]=_now.strftime("%H:%M:%S")
+        _it["break_ts"]=None
+        _it["break_time"]="Before start"
 
 row_map_index={}; row_map_stock={}
 
@@ -426,11 +428,11 @@ DASHBOARD_START_ROW=17
 
 def build_top_summary():
     """Stock and index rankings with the same live fields as the main dashboard."""
-    grid=[[""]*22 for _ in range(14)]
+    grid=[[""]*22 for _ in range(20)]
     grid[0][0]="TOP 5 GAINERS"
     grid[0][11]="TOP 5 LOSERS"
     grid[0][20]="Updated"
-    grid[0][21]=datetime.now().strftime("%H:%M:%S")
+    grid[0][21]=datetime.now(IST).strftime("%H:%M:%S IST")
     stock_headers=["Stock","Strike","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","DIST%","STATUS","BREAK TIME"]
     grid[1][0:11]=stock_headers
     grid[1][11:22]=stock_headers
@@ -444,16 +446,19 @@ def build_top_summary():
         return [it["symbol"],opt["strike"],opt["pdh"],opt["pdl"],opt["wh"],opt["wl"],opt["ltp"],f"{opt['change']:+.2f}%",f"{opt['dist']:.1f}%",get_status(opt),opt.get("break_time","")]
     for i,it in enumerate(gainers): grid[i+2][0:11]=make_row(it,"CE")
     for i,it in enumerate(losers): grid[i+2][11:22]=make_row(it,"PE")
-    grid[7][0]="TOP 5 INDEX GAINERS"
-    grid[7][11]="TOP 5 INDEX LOSERS"
+    grid[7][0]="INDEX GAINERS — ALL 11"
+    grid[7][11]="INDEX LOSERS — ALL 11"
     index_headers=["Index","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP","CHANGE %","DIST%","STATUS","BREAK TIME"]
     grid[8][0:10]=index_headers
     grid[8][11:21]=index_headers
-    indices=[v for v in index_data.values() if v.get("prev_close",0)>0 and v.get("ltp",0)>0]
-    index_gainers=sorted((v for v in indices if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
-    index_losers=sorted((v for v in indices if v["change"]<0),key=lambda x:x["change"])[:5]
+    # Keep the complete watchlist visible in both rankings; limiting to five or
+    # filtering by sign hid indices on flat days or when fewer than five moved.
+    indices=list(index_data.values())
+    index_gainers=sorted(indices,key=lambda x:x.get("change",0),reverse=True)
+    index_losers=sorted(indices,key=lambda x:x.get("change",0))
     def make_index_row(it):
-        return [it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:+.2f}%",f"{it['dist']:.1f}%",get_status(it) or "-",it.get("break_time","")]
+        live=it.get("prev_close",0)>0 and it.get("ltp",0)>0
+        return [it["symbol"],it["pdh"] or "",it["pdl"] or "",it["wh"] or "",it["wl"] or "",it["ltp"] or "",f"{it['change']:+.2f}%" if live else "N/A",f"{it['dist']:.1f}%" if it.get("ltp",0)>0 else "",get_status(it) or "-",it.get("break_time","")]
     for i,it in enumerate(index_gainers): grid[i+9][0:10]=make_index_row(it)
     for i,it in enumerate(index_losers): grid[i+9][11:21]=make_index_row(it)
     return grid
@@ -531,7 +536,7 @@ def apply_pd_colors():
             add_rule(formula,color,col_start,col_start+1,row_start,row_end)
 
     # Index gainers / losers have no strike or option break time.
-    index_panels=[("F","B","C","D","E","G","I",9,14),("Q","M","N","O","P","R","T",9,14)]
+    index_panels=[("F","B","C","D","E","G","I",9,20),("Q","M","N","O","P","R","T",9,20)]
     for ltp,pdh,pdl,week_high,week_low,pct,status,row_start,row_end in index_panels:
         first_row=row_start+1
         specs=[
@@ -698,7 +703,7 @@ def write_dashboard(clear_all=False):
         # Clear old content only once when the bot initializes the dashboard.
         sheet2.batch_clear(["A1:V5000"])
     updates=[
-        {"range":f"'{title}'!A1:V14","values":summary},
+        {"range":f"'{title}'!A1:V20","values":summary},
     ]
     if rows:
         updates.append({"range":f"'{title}'!A{DASHBOARD_START_ROW}:V{end_row}","values":rows})
@@ -715,7 +720,7 @@ try:
     main_rows=build_rows()
     sheet.batch_clear(["A4:Z5000"])
     sheet.update(values=main_rows,range_name="A4")
-    sheet.update(values=[[datetime.now().strftime("%H:%M:%S")]],range_name="C3")
+    sheet.update(values=[[datetime.now(IST).strftime("%H:%M:%S IST")]],range_name="C3")
     apply_main_index_colors()
     write_dashboard(clear_all=True)
 except Exception as e:
@@ -748,7 +753,7 @@ def on_message(msg):
         except: pass
 
 def on_open():
-    print(f"LIVE STARTED - {len(all_keys)} keys OCT {datetime.now()}")
+    print(f"LIVE STARTED - {len(all_keys)} keys {datetime.now(IST):%Y-%m-%d %H:%M:%S IST}")
 
 streamer.on("open", on_open); streamer.on("message", on_message); streamer.connect()
 
@@ -790,7 +795,7 @@ def updater():
                     write_dashboard()
                     dashboard_signature[0]=current_signature
                 except Exception as e: print(f"DASHBOARD REFRESH ERR {e}")
-            main_batch=[{"range":"C3","values":[[datetime.now().strftime("%H:%M:%S")]]}]
+            main_batch=[{"range":"C3","values":[[datetime.now(IST).strftime("%H:%M:%S IST")]]}]
             for sym,rnum in row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
@@ -801,7 +806,7 @@ def updater():
                 pe=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]=="PE"),None)
                 if ce and ce["ltp"]>0: main_batch.append({"range":f"G{rnum}:J{rnum}","values":[[ce["ltp"],f"{ce['change']:.2f}%",f"{ce['dist']:.1f}%",get_status(ce)]]})
                 if pe and pe["ltp"]>0: main_batch.append({"range":f"R{rnum}:U{rnum}","values":[[pe["ltp"],f"{pe['change']:.2f}%",f"{pe['dist']:.1f}%",get_status(pe)]]})
-            dash_batch=[{"range":"A1:V14","values":build_top_summary()}]
+            dash_batch=[{"range":"A1:V20","values":build_top_summary()}]
             for sym,rnum in dashboard_row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
