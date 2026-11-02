@@ -264,30 +264,6 @@ for i in range(1,8):
     if datetime.strptime(d,"%Y-%m-%d").weekday()<5: pd_day=d; break
 
 print(f"PD Day: {pd_day}")
-
-def set_previous_session_from_history(instrument_key, candles, target_data):
-    """Use the latest daily candle on/before pd_day when the direct PD query misses."""
-    if not candles or not pd_day or instrument_key not in target_data:
-        return False
-    try:
-        target_date=pd.Timestamp(pd_day).date()
-        eligible=[]
-        for candle in candles:
-            candle_time=pd.to_datetime(candle[0],errors="coerce")
-            if (pd.notna(candle_time) and candle_time.date()<=target_date
-                    and (target_date-candle_time.date()).days<=4):
-                eligible.append((candle_time,candle))
-        if not eligible:
-            return False
-        candle=max(eligible,key=lambda item:item[0])[1]
-        item=target_data[instrument_key]
-        if float(item.get("pdh",0) or 0)<=0: item["pdh"]=float(candle[2])
-        if float(item.get("pdl",0) or 0)<=0: item["pdl"]=float(candle[3])
-        if float(item.get("prev_close",0) or 0)<=0: item["prev_close"]=float(candle[4])
-        return True
-    except (IndexError,TypeError,ValueError):
-        return False
-
 print("Fetching stock previous close / PDH / PDL...")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk:get_candle(kk,pd_day,pd_day),stock_keys):
@@ -309,7 +285,6 @@ print(f"STOCK PREV-CLOSE CSV FALLBACK: {stock_close_fallbacks}")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), index_keys):
         if candles:
-            set_previous_session_from_history(k,candles,index_data)
             d=pd.DataFrame(candles,columns=["dt","open","high","low","close","vol","oi"])
             if k in index_data:
                 index_data[k]["wh"]=float(d["high"].max()); index_data[k]["wl"]=float(d["low"].min())
@@ -321,6 +296,8 @@ with ThreadPoolExecutor(max_workers=10) as ex:
 for k,v in index_data.items():
     if v["wh"]==0: v["wh"]=v["ltp"]
     if v["wl"]==0: v["wl"]=v["ltp"]
+    if v["pdh"]==0: v["pdh"]=v["ltp"]
+    if v["pdl"]==0: v["pdl"]=v["ltp"]
     if v["prev_close"]==0: v["prev_close"]=v["ltp"]
     v["change"]=(v["ltp"]-v["prev_close"])/v["prev_close"]*100 if v["prev_close"]>0 else 0
     v["dist"]=v["ltp"]/v["wh"]*100 if v["wh"]>0 else 0
@@ -370,7 +347,6 @@ print(f"Option Keys: {len(option_keys)}")
 with ThreadPoolExecutor(max_workers=10) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), option_keys):
         if candles:
-            set_previous_session_from_history(k,candles,option_data)
             d=pd.DataFrame(candles,columns=["dt","open","high","low","close","vol","oi"])
             if k in option_data:
                 option_data[k]["wh"]=float(d["high"].max()); option_data[k]["wl"]=float(d["low"].min())
@@ -387,6 +363,8 @@ fetch_ltp(option_keys, option_data)
 for k,v in option_data.items():
     if v["wh"]==0: v["wh"]=v["ltp"] or 1
     if v["wl"]==0: v["wl"]=v["ltp"] or 1
+    if v["pdh"]==0: v["pdh"]=v["ltp"]
+    if v["pdl"]==0: v["pdl"]=v["ltp"]
     if v["prev_close"]==0: v["prev_close"]=v["ltp"]
     v["change"]=(v["ltp"]-v["prev_close"])/v["prev_close"]*100 if v["prev_close"]>0 else 0
     v["dist"]=v["ltp"]/v["wh"]*100 if v["wh"]>0 else 0
@@ -395,13 +373,6 @@ def get_status(it):
     if it["ltp"]>it["wh"]: return "BREAKOUT"
     if it["ltp"]<it["wl"]: return "BREAKDOWN"
     return ""
-
-def display_pd_level(value):
-    try:
-        price=float(value)
-        return round(price,2) if price>0 else "--"
-    except (TypeError,ValueError):
-        return "--"
 
 def update_break_time(it, old_status):
     new_status=get_status(it)
@@ -441,14 +412,14 @@ def build_rows():
         sector_stocks.sort(key=lambda x: (x[1]["change"] if x[1] else (x[2]["change"] if x[2] else -9999)), reverse=True)
         for stock, ce_it, pe_it in sector_stocks:
             ce_strike = ce_it["strike"] if ce_it else (pe_it["strike"] if pe_it else 0)
-            rows.append([stock, ce_strike, display_pd_level(ce_it["pdh"]) if ce_it else "", display_pd_level(ce_it["pdl"]) if ce_it else "", ce_it["wh"] if ce_it else 0, ce_it["wl"] if ce_it else 0, ce_it["ltp"] if ce_it else 0, f"{ce_it['change']:.2f}%" if ce_it else "", f"{ce_it['dist']:.1f}%" if ce_it else "", get_status(ce_it) if ce_it else "", "", stock, pe_it["strike"] if pe_it else ce_strike, display_pd_level(pe_it["pdh"]) if pe_it else "", display_pd_level(pe_it["pdl"]) if pe_it else "", pe_it["wh"] if pe_it else 0, pe_it["wl"] if pe_it else 0, pe_it["ltp"] if pe_it else 0, f"{pe_it['change']:.2f}%" if pe_it else "", f"{pe_it['dist']:.1f}%" if pe_it else "", get_status(pe_it) if pe_it else ""])
+            rows.append([stock, ce_strike, ce_it["pdh"] if ce_it else 0, ce_it["pdl"] if ce_it else 0, ce_it["wh"] if ce_it else 0, ce_it["wl"] if ce_it else 0, ce_it["ltp"] if ce_it else 0, f"{ce_it['change']:.2f}%" if ce_it else "", f"{ce_it['dist']:.1f}%" if ce_it else "", get_status(ce_it) if ce_it else "", "", stock, pe_it["strike"] if pe_it else ce_strike, pe_it["pdh"] if pe_it else 0, pe_it["pdl"] if pe_it else 0, pe_it["wh"] if pe_it else 0, pe_it["wl"] if pe_it else 0, pe_it["ltp"] if pe_it else 0, f"{pe_it['change']:.2f}%" if pe_it else "", f"{pe_it['dist']:.1f}%" if pe_it else "", get_status(pe_it) if pe_it else ""])
             row_map_stock[stock]=rnum; rnum+=1
         rows.append([]); rnum+=1
     rows.append([]); rnum+=1
     rows.append(["=== INDEX ==="]); rnum+=1
     rows.append(["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP (Spot)","CHANGE %","DIST%","STATUS"]); rnum+=1
     for it in sorted(index_data.values(), key=lambda x: x["change"], reverse=True):
-        rows.append([it["symbol"],display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)])
+        rows.append([it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)])
         row_map_index[it["symbol"]]=rnum; rnum+=1
     return rows
 
@@ -473,7 +444,7 @@ def build_top_summary():
         opt=next((v for v in option_data.values() if v["underlying"]==it["symbol"] and v["otype"]==otype),None)
         if not opt:
             return [it["symbol"]]+[""]*10
-        return [it["symbol"],opt["strike"],display_pd_level(opt["pdh"]),display_pd_level(opt["pdl"]),opt["wh"],opt["wl"],opt["ltp"],f"{opt['change']:+.2f}%",f"{opt['dist']:.1f}%",get_status(opt),opt.get("break_time","")]
+        return [it["symbol"],opt["strike"],opt["pdh"],opt["pdl"],opt["wh"],opt["wl"],opt["ltp"],f"{opt['change']:+.2f}%",f"{opt['dist']:.1f}%",get_status(opt),opt.get("break_time","")]
     for i,it in enumerate(gainers): grid[i+2][0:11]=make_row(it,"CE")
     for i,it in enumerate(losers): grid[i+2][11:22]=make_row(it,"PE")
     grid[7][0]="TOP 5 INDEX GAINERS"
@@ -485,7 +456,7 @@ def build_top_summary():
     index_gainers=sorted((v for v in indices if v["change"]>0),key=lambda x:x["change"],reverse=True)[:5]
     index_losers=sorted((v for v in indices if v["change"]<0),key=lambda x:x["change"])[:5]
     def make_index_row(it):
-        return [it["symbol"],display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:+.2f}%",f"{it['dist']:.1f}%",get_status(it) or "-",it.get("break_time","")]
+        return [it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:+.2f}%",f"{it['dist']:.1f}%",get_status(it) or "-",it.get("break_time","")]
     for i,it in enumerate(index_gainers): grid[i+9][0:10]=make_index_row(it)
     for i,it in enumerate(index_losers): grid[i+9][11:21]=make_index_row(it)
     return grid
@@ -512,7 +483,7 @@ def build_dashboard():
             items.sort(key=lambda x:x["change"], reverse=True)
         for offset,it in enumerate(items,1):
             row_idx=title_row+1+offset
-            put(row_idx,col,[it["underlying"],it["strike"],display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",status,it.get("break_time","")])
+            put(row_idx,col,[it["underlying"],it["strike"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",status,it.get("break_time","")])
             row_map_option[(it["underlying"],otype)]=row_idx+DASHBOARD_START_ROW
         if items:
             start_row_index=DASHBOARD_START_ROW+title_row+1
@@ -529,7 +500,7 @@ def build_dashboard():
     put(index_title+1,0,["Symbol","PD High","PD Low","WEEK HIGH","WEEK LOW","LTP (Spot)","CHANGE %","DIST%","STATUS","BREAK TIME"])
     for offset,it in enumerate(sorted(index_data.values(),key=lambda x:x["change"],reverse=True),2):
         row_idx=index_title+offset
-        put(row_idx,0,[it["symbol"],display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")])
+        put(row_idx,0,[it["symbol"],it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")])
         dashboard_row_map_index[it["symbol"]]=row_idx+DASHBOARD_START_ROW
     return [row+[""]*(22-len(row)) for row in grid]
 
@@ -826,7 +797,7 @@ def updater():
             for sym,rnum in row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
-                        main_batch.append({"range":f"B{rnum}:I{rnum}","values":[[display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)]]})
+                        main_batch.append({"range":f"B{rnum}:I{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it)]]})
                         break
             for stock,rnum in row_map_stock.items():
                 ce=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]=="CE"),None)
@@ -837,7 +808,7 @@ def updater():
             for sym,rnum in dashboard_row_map_index.items():
                 for it in index_data.values():
                     if it["symbol"]==sym and it["ltp"]>0:
-                        dash_batch.append({"range":f"B{rnum}:J{rnum}","values":[[display_pd_level(it["pdh"]),display_pd_level(it["pdl"]),it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")]]})
+                        dash_batch.append({"range":f"B{rnum}:J{rnum}","values":[[it["pdh"],it["pdl"],it["wh"],it["wl"],it["ltp"],f"{it['change']:.2f}%",f"{it['dist']:.1f}%",get_status(it),it.get("break_time","")]]})
                         break
             for (stock,otype),rnum in row_map_option.items():
                 it=next((v for v in option_data.values() if v["underlying"]==stock and v["otype"]==otype),None)
