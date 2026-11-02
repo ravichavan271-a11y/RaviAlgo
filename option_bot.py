@@ -211,6 +211,52 @@ def get_candle_with_fallback(k, base_day):
         except: pass
     return k, []
 
+def fetch_previous_session_ohlc(keys, target_data):
+    """Fill missing PDH/PDL from Upstox's daily previous-session OHLC quote."""
+    if not keys:
+        return 0
+
+    batches = [keys[i:i + 20] for i in range(0, len(keys), 20)]
+
+    def fetch_batch(batch):
+        try:
+            response = requests.get(
+                "https://api.upstox.com/v3/market-quote/ohlc",
+                params={"instrument_key": ",".join(batch), "interval": "1d"},
+                headers={
+                    "Authorization": f"Bearer {UPSTOX_ACCESS_TOKEN}",
+                    "Accept": "application/json",
+                },
+                timeout=15,
+            )
+            if response.status_code != 200:
+                print(f"PD OHLC request failed: HTTP {response.status_code}")
+                return 0
+            quote_data = response.json().get("data", {})
+            updated = 0
+            for quote in quote_data.values():
+                instrument_key = str(quote.get("instrument_token", ""))
+                item = target_data.get(instrument_key)
+                previous = quote.get("prev_ohlc") or {}
+                if item is None or not previous:
+                    continue
+                high = float(previous.get("high") or 0)
+                low = float(previous.get("low") or 0)
+                close = float(previous.get("close") or 0)
+                if high > 0 and low > 0:
+                    item["pdh"] = high
+                    item["pdl"] = low
+                    if close > 0:
+                        item["prev_close"] = close
+                    updated += 1
+            return updated
+        except (requests.RequestException, TypeError, ValueError) as exc:
+            print(f"PD OHLC error: {type(exc).__name__}")
+            return 0
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return sum(executor.map(fetch_batch, batches))
+
 def fetch_ltp(keys, data_dict):
     cnt=0
     for i in range(0, len(keys), 20):
@@ -295,6 +341,8 @@ with ThreadPoolExecutor(max_workers=10) as ex:
             stock_underlying_data[k]["pdh"]=float(candles[0][2])
             stock_underlying_data[k]["pdl"]=float(candles[0][3])
             stock_underlying_data[k]["prev_close"]=float(candles[0][4])
+stock_pd_quotes=fetch_previous_session_ohlc(stock_keys,stock_underlying_data)
+print(f"STOCK PDH/PDL FROM DAILY OHLC: {stock_pd_quotes}/{len(stock_keys)}")
 stock_close_fallbacks=0
 for it in stock_underlying_data.values():
     # The instrument master carries the prior close. Use it when the daily
@@ -318,6 +366,8 @@ with ThreadPoolExecutor(max_workers=10) as ex:
         if candles and k in index_data:
             index_data[k]["pdh"]=float(candles[0][2]); index_data[k]["pdl"]=float(candles[0][3])
             index_data[k]["prev_close"]=float(candles[0][4])
+index_pd_quotes=fetch_previous_session_ohlc(index_keys,index_data)
+print(f"INDEX PDH/PDL FROM DAILY OHLC: {index_pd_quotes}/{len(index_keys)}")
 for k,v in index_data.items():
     if v["wh"]==0: v["wh"]=v["ltp"]
     if v["wl"]==0: v["wl"]=v["ltp"]
@@ -380,6 +430,8 @@ with ThreadPoolExecutor(max_workers=15) as ex:
         if candles and k in option_data:
             option_data[k]["pdh"]=float(candles[0][2]); option_data[k]["pdl"]=float(candles[0][3])
             option_data[k]["prev_close"]=float(candles[0][4])
+option_pd_quotes=fetch_previous_session_ohlc(option_keys,option_data)
+print(f"OPTION PDH/PDL FROM DAILY OHLC: {option_pd_quotes}/{len(option_keys)}")
 
 print("Fetching Option LTP LIVE OCT...")
 fetch_ltp(option_keys, option_data)
