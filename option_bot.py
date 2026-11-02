@@ -199,66 +199,30 @@ def get_candle(k, fro, to):
     return k, []
 
 def get_candle_with_fallback(k, base_day):
-    for i in range(0, 6):
-        d = (datetime.strptime(base_day, "%Y-%m-%d") - timedelta(days=i)).strftime("%Y-%m-%d")
-        if datetime.strptime(d,"%Y-%m-%d").weekday() >= 5: continue
-        ek=urllib.parse.quote(k, safe=''); url=f"https://api.upstox.com/v3/historical-candle/{ek}/days/1/{d}/{d}"
+    target_date=datetime.strptime(base_day,"%Y-%m-%d").date()
+    from_date=(target_date-timedelta(days=14)).strftime("%Y-%m-%d")
+    ek=urllib.parse.quote(k,safe='')
+    url=f"https://api.upstox.com/v3/historical-candle/{ek}/days/1/{base_day}/{from_date}"
+    for attempt in range(4):
         try:
             resp=requests.get(url, headers={"Authorization": f"Bearer {UPSTOX_ACCESS_TOKEN}"}, timeout=10)
             if resp.status_code==200:
                 candles = resp.json().get("data",{}).get("candles",[])
-                if candles: return k, candles
-        except: pass
+                eligible=[]
+                for candle in candles:
+                    candle_date=pd.to_datetime(candle[0],errors="coerce")
+                    if pd.notna(candle_date) and candle_date.date()<=target_date and (target_date-candle_date.date()).days<=14:
+                        eligible.append((candle_date,candle))
+                if eligible:
+                    return k,[max(eligible,key=lambda item:item[0])[1]]
+                return k,[]
+            if resp.status_code not in (429,500,502,503,504):
+                return k,[]
+        except requests.RequestException:
+            pass
+        if attempt<3:
+            time.sleep(0.4*(attempt+1))
     return k, []
-
-def fetch_previous_session_ohlc(keys, target_data):
-    """Prefer Upstox daily previous-session OHLC over a guessed PD level."""
-    batches=[keys[i:i+20] for i in range(0,len(keys),20)]
-
-    def fetch_batch(batch):
-        try:
-            response=requests.get(
-                "https://api.upstox.com/v3/market-quote/ohlc",
-                params={"instrument_key": ",".join(batch), "interval":"1d"},
-                headers={"Authorization":f"Bearer {UPSTOX_ACCESS_TOKEN}","Accept":"application/json"},
-                timeout=15,
-            )
-            if response.status_code!=200:
-                print(f"PD OHLC request failed: HTTP {response.status_code}")
-                return 0
-            quote_data=response.json().get("data",{})
-            by_instrument={}
-            for response_key,quote in quote_data.items():
-                token=str(quote.get("instrument_token", "")).strip()
-                if token:
-                    by_instrument[token]=quote
-                normalized=str(response_key).replace(":","|")
-                by_instrument[normalized]=quote
-            updated=0
-            for key in batch:
-                quote=by_instrument.get(key)
-                if not quote:
-                    continue
-                previous=quote.get("prev_ohlc") or {}
-                high=float(previous.get("high") or 0)
-                low=float(previous.get("low") or 0)
-                close=float(previous.get("close") or 0)
-                if high<=0 or low<=0 or high<low:
-                    continue
-                target_data[key]["pdh"]=high
-                target_data[key]["pdl"]=low
-                if close>0:
-                    target_data[key]["prev_close"]=close
-                updated+=1
-            return updated
-        except (requests.RequestException,TypeError,ValueError) as exc:
-            print(f"PD OHLC error: {type(exc).__name__}")
-            return 0
-
-    if not batches:
-        return 0
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        return sum(executor.map(fetch_batch,batches))
 
 def display_pd(value):
     try:
@@ -321,14 +285,12 @@ for i in range(1,8):
 
 print(f"PD Day: {pd_day}")
 print("Fetching stock previous close / PDH / PDL...")
-with ThreadPoolExecutor(max_workers=10) as ex:
-    for k,candles in ex.map(lambda kk:get_candle(kk,pd_day,pd_day),stock_keys):
+with ThreadPoolExecutor(max_workers=5) as ex:
+    for k,candles in ex.map(lambda kk:get_candle_with_fallback(kk,pd_day),stock_keys):
         if candles and k in stock_underlying_data:
             stock_underlying_data[k]["pdh"]=float(candles[0][2])
             stock_underlying_data[k]["pdl"]=float(candles[0][3])
             stock_underlying_data[k]["prev_close"]=float(candles[0][4])
-stock_pd_count=fetch_previous_session_ohlc(stock_keys,stock_underlying_data)
-print(f"STOCK PD LEVELS FROM DAILY OHLC: {stock_pd_count}/{len(stock_keys)}")
 stock_close_fallbacks=0
 for it in stock_underlying_data.values():
     # The instrument master carries the prior close. Use it when the daily
@@ -340,7 +302,7 @@ for it in stock_underlying_data.values():
 print(f"STOCK PREV-CLOSE CSV FALLBACK: {stock_close_fallbacks}")
 
 # Weekly WH/WL
-with ThreadPoolExecutor(max_workers=10) as ex:
+with ThreadPoolExecutor(max_workers=5) as ex:
     for k,candles in ex.map(lambda kk: get_candle(kk, weekly_from, weekly_to), index_keys):
         if candles:
             d=pd.DataFrame(candles,columns=["dt","open","high","low","close","vol","oi"])
@@ -351,8 +313,8 @@ with ThreadPoolExecutor(max_workers=10) as ex:
         if candles and k in index_data:
             index_data[k]["pdh"]=float(candles[0][2]); index_data[k]["pdl"]=float(candles[0][3])
             index_data[k]["prev_close"]=float(candles[0][4])
-index_pd_count=fetch_previous_session_ohlc(index_keys,index_data)
-print(f"INDEX PD LEVELS FROM DAILY OHLC: {index_pd_count}/{len(index_keys)}")
+index_pd_filled=sum(1 for v in index_data.values() if v["pdh"]>0 and v["pdl"]>0)
+print(f"INDEX PD LEVELS FROM HISTORICAL CANDLES: {index_pd_filled}/{len(index_keys)}")
 for k,v in index_data.items():
     if v["wh"]==0: v["wh"]=v["ltp"]
     if v["wl"]==0: v["wl"]=v["ltp"]
@@ -409,13 +371,13 @@ with ThreadPoolExecutor(max_workers=10) as ex:
             if k in option_data:
                 option_data[k]["wh"]=float(d["high"].max()); option_data[k]["wl"]=float(d["low"].min())
 
-with ThreadPoolExecutor(max_workers=15) as ex:
+with ThreadPoolExecutor(max_workers=5) as ex:
     for k,candles in ex.map(lambda kk: get_candle_with_fallback(kk, pd_day), option_keys):
         if candles and k in option_data:
             option_data[k]["pdh"]=float(candles[0][2]); option_data[k]["pdl"]=float(candles[0][3])
             option_data[k]["prev_close"]=float(candles[0][4])
-option_pd_count=fetch_previous_session_ohlc(option_keys,option_data)
-print(f"OPTION PD LEVELS FROM DAILY OHLC: {option_pd_count}/{len(option_keys)}")
+option_pd_filled=sum(1 for v in option_data.values() if v["pdh"]>0 and v["pdl"]>0)
+print(f"OPTION PD LEVELS FROM HISTORICAL CANDLES: {option_pd_filled}/{len(option_keys)}")
 
 print("Fetching Option LTP LIVE OCT...")
 fetch_ltp(option_keys, option_data)
