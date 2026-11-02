@@ -335,7 +335,10 @@ if instrument_type_col:
 
 stock_to_options = {}
 for stock in set([s for lst in STRUCTURE.values() for s in lst]):
-    f = opt_df[opt_df[tradingsymbol_col].astype(str).str.startswith(stock)]
+    # Match a complete NSE symbol before the expiry token (e.g. LT26NOV...);
+    # startswith("LT") also matches unrelated symbols such as LTM26NOV...
+    pattern=rf"^{re.escape(stock.upper())}\d{{2}}[A-Z]{{3}}"
+    f = opt_df[opt_df[tradingsymbol_col].astype(str).str.upper().str.match(pattern,na=False)]
     if not f.empty: stock_to_options[stock] = f
 
 option_data = {}; option_keys = []
