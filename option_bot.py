@@ -785,7 +785,7 @@ def on_message(msg):
 def on_open():
     print(f"LIVE STARTED - {len(all_keys)} keys {datetime.now(IST):%Y-%m-%d %H:%M:%S IST}")
 
-streamer.on("open", on_open); streamer.on("message", on_message); streamer.connect()
+streamer.on("open", on_open); streamer.on("message", on_message)
 
 def updater():
     loop=0
@@ -858,4 +858,6 @@ def updater():
         loop+=1
 
 threading.Thread(target=updater, daemon=True).start()
+print(f"SHEET UPDATER STARTED - 5-second writes {datetime.now(IST):%H:%M:%S IST}", flush=True)
+streamer.connect()
 while True: time.sleep(1)
