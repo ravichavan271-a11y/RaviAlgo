@@ -5,7 +5,9 @@ import hashlib
 import hmac
 import os
 import secrets
+import threading
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -15,6 +17,87 @@ AUTH_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 PROFILE_URL = "https://api.upstox.com/v2/user/profile"
 STATE_MAX_AGE_SECONDS = 15 * 60
+IST = ZoneInfo("Asia/Kolkata")
+_LOGIN_STATE_LOCK = threading.Lock()
+_LOGIN_COMPLETED_DATE = None
+_LOGIN_CHECKED_DATE = None
+_LOGIN_CHECK_RESULT = False
+
+
+def _get_sheet_client():
+    import json
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
+    if env_json:
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
+        return gspread.authorize(credentials)
+
+    for path in (
+        os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
+        "service_account.json",
+        "./service_account.json",
+        "/etc/secrets/service_account.json",
+    ):
+        if path and os.path.isfile(path):
+            try:
+                credentials = ServiceAccountCredentials.from_json_keyfile_name(path, scope)
+                return gspread.authorize(credentials)
+            except Exception:
+                continue
+    raise RuntimeError("Google service-account credentials are not configured.")
+
+
+def _saved_token_is_valid():
+    try:
+        token = str(
+            _get_sheet_client()
+            .open(os.environ.get("TOKEN_SPREADSHEET_NAME", "Dsheet"))
+            .sheet1.cell(1, 2).value or ""
+        ).strip()
+        if len(token) < 50:
+            return False
+        response = requests.get(
+            PROFILE_URL,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        return response.status_code == 200
+    except Exception as exc:
+        print(f"Could not verify the saved Upstox token before login reminders ({type(exc).__name__}).", flush=True)
+        return False
+
+
+def login_completed_today():
+    """Whether this Render process completed Upstox login today (India time)."""
+    global _LOGIN_CHECKED_DATE, _LOGIN_CHECK_RESULT, _LOGIN_COMPLETED_DATE
+    today = datetime.now(IST).date()
+    with _LOGIN_STATE_LOCK:
+        if _LOGIN_COMPLETED_DATE == today:
+            return True
+        if _LOGIN_CHECKED_DATE == today:
+            return _LOGIN_CHECK_RESULT
+        _LOGIN_CHECKED_DATE = today
+
+    token_valid = _saved_token_is_valid()
+    with _LOGIN_STATE_LOCK:
+        _LOGIN_CHECK_RESULT = token_valid
+        if token_valid:
+            _LOGIN_COMPLETED_DATE = today
+        return token_valid
+
+
+def _mark_login_completed():
+    global _LOGIN_COMPLETED_DATE, _LOGIN_CHECKED_DATE, _LOGIN_CHECK_RESULT
+    with _LOGIN_STATE_LOCK:
+        _LOGIN_COMPLETED_DATE = datetime.now(IST).date()
+        _LOGIN_CHECKED_DATE = _LOGIN_COMPLETED_DATE
+        _LOGIN_CHECK_RESULT = True
 
 
 def _client_id():
@@ -39,35 +122,7 @@ def _redirect_uri():
 
 def write_access_token(access_token):
     """Save the verified token to Dsheet!B1 using the configured Google identity."""
-    import json
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
-    if env_json:
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
-        client = gspread.authorize(credentials)
-    else:
-        credentials = None
-        for path in (
-            os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
-            "service_account.json",
-            "./service_account.json",
-            "/etc/secrets/service_account.json",
-        ):
-            if path and os.path.isfile(path):
-                try:
-                    credentials = ServiceAccountCredentials.from_json_keyfile_name(path, scope)
-                    break
-                except Exception:
-                    continue
-        if credentials is None:
-            raise RuntimeError("Google service-account credentials are not configured.")
-        client = gspread.authorize(credentials)
+    client = _get_sheet_client()
     spreadsheet = client.open(os.environ.get("TOKEN_SPREADSHEET_NAME", "Dsheet"))
     spreadsheet.sheet1.update_acell("B1", access_token)
 
@@ -105,35 +160,39 @@ def build_login_url():
     return urlunsplit((scheme, netloc, path, urlencode(params), ""))
 
 
-def send_login_reminder(runner_mode):
+def send_login_reminder(runner_mode, scheduled_time):
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not bot_token or not chat_id:
-        print("08:30 login reminder skipped; Telegram credentials are not configured.", flush=True)
+        print(f"{scheduled_time} login reminder skipped; Telegram credentials are not configured.", flush=True)
         return False
 
     try:
         login_url = build_login_url()
         message = (
-            "08:30 IST: Log in to Upstox using the link below. After approval, "
+            f"{scheduled_time} IST: Log in to Upstox using the link below. After approval, "
             "the callback will save the new token to Dsheet!B1 automatically. "
+            "If you have not logged in yet, another link will arrive in 30 minutes. "
+            "Links expire after 15 minutes; successful login stops further reminders. "
             "The trading bots start at 09:01."
         )
     except Exception as exc:
-        print(f"08:30 login reminder not sent; Upstox login link is not configured ({type(exc).__name__}).", flush=True)
+        print(f"{scheduled_time} login reminder not sent; Upstox login link is not configured ({type(exc).__name__}).", flush=True)
         return False
     payload = {"chat_id": chat_id, "text": f"{message}\nLogin: {login_url}", "link_preview_options": {"is_disabled": True}}
     try:
         response = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload, timeout=15)
         response.raise_for_status()
-        print(f"08:30 Upstox login reminder sent for {runner_mode}.", flush=True)
+        print(f"{scheduled_time} Upstox login reminder sent for {runner_mode}.", flush=True)
         return True
     except requests.RequestException as exc:
-        print(f"08:30 Upstox login reminder failed: {type(exc).__name__}.", flush=True)
+        print(f"{scheduled_time} Upstox login reminder failed: {type(exc).__name__}.", flush=True)
         return False
 
 
 def validate_state(state):
+    if login_completed_today():
+        return False
     client_secret = _client_secret()
     try:
         timestamp_text, nonce, signature = state.split(".", 2)
@@ -197,6 +256,7 @@ def exchange_and_store(code, state):
     )
     profile.raise_for_status()
     write_access_token(access_token)
+    _mark_login_completed()
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if bot_token and chat_id:

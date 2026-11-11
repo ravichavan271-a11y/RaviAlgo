@@ -1,6 +1,6 @@
 """Render controller for Upstox OAuth and the option_bot only."""
 
-from datetime import datetime, time as day_time
+from datetime import datetime, time as day_time, timedelta
 import os
 from pathlib import Path
 import subprocess
@@ -11,11 +11,12 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, request
 
-from oauth_flow import build_login_url, handle_callback, send_login_reminder
+from oauth_flow import build_login_url, handle_callback, login_completed_today, send_login_reminder
 
 
 IST = ZoneInfo("Asia/Kolkata")
-LOGIN_AT = day_time(8, 30)
+LOGIN_FIRST_AT = day_time(8, 0)
+LOGIN_LAST_AT = day_time(15, 30)
 START_AT = day_time(9, 1)
 STOP_AT = day_time(15, 45)
 ROOT = Path(__file__).resolve().parent
@@ -81,21 +82,37 @@ def run_option_bot_session():
 
 
 def daily_scheduler():
-    login_sent_date = None
+    login_sent_slot = None
+    login_slot_date = None
+    login_retry_at = None
     session_started_date = None
     while True:
         now = now_ist()
+        if login_slot_date != now.date():
+            login_slot_date = now.date()
+            login_sent_slot = None
+            login_retry_at = None
         if now.weekday() < 5:
-            if LOGIN_AT <= now.time() < START_AT and login_sent_date != now.date():
+            # Send at 08:00, 08:30, 09:00, then every 30 minutes until login
+            # succeeds or the market-day reminder window ends at 15:30 IST.
+            slot_minute = (now.minute // 30) * 30
+            login_slot = now.replace(minute=slot_minute, second=0, microsecond=0)
+            if (
+                LOGIN_FIRST_AT <= login_slot.time() <= LOGIN_LAST_AT
+                and login_sent_slot != login_slot
+                and not login_completed_today()
+                and (login_retry_at is None or now >= login_retry_at)
+            ):
                 try:
-                    if send_login_reminder("RENDER"):
-                        login_sent_date = now.date()
+                    if send_login_reminder("RENDER", login_slot.strftime("%H:%M")):
+                        login_sent_slot = login_slot
+                        login_retry_at = None
                     else:
-                        print("Login reminder was not sent; retrying in 30 seconds.", flush=True)
-                        time.sleep(30)
+                        print(f"{login_slot:%H:%M} login reminder not sent; retrying in 30 seconds.", flush=True)
+                        login_retry_at = now + timedelta(seconds=30)
                 except Exception as exc:
                     print(f"Login reminder failed: {type(exc).__name__}; retrying in 30 seconds.", flush=True)
-                    time.sleep(30)
+                    login_retry_at = now + timedelta(seconds=30)
 
             if (
                 START_AT <= now.time() < STOP_AT
@@ -103,7 +120,11 @@ def daily_scheduler():
             ):
                 session_started_date = now.date()
                 with _scheduler_lock:
-                    run_option_bot_session()
+                    threading.Thread(
+                        target=run_option_bot_session,
+                        name="render-option-bot-session",
+                        daemon=True,
+                    ).start()
 
         time.sleep(5)
 
@@ -136,6 +157,8 @@ def status():
 
 @app.get("/upstox-login")
 def upstox_login():
+    if login_completed_today():
+        return "Upstox login is already complete for today; no new login link is needed.", 409
     try:
         return redirect(build_login_url(), code=302)
     except Exception as exc:
