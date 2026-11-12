@@ -16,7 +16,7 @@ import requests
 AUTH_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 PROFILE_URL = "https://api.upstox.com/v2/user/profile"
-STATE_MAX_AGE_SECONDS = 15 * 60
+STATE_MAX_AGE_SECONDS = 30 * 60
 IST = ZoneInfo("Asia/Kolkata")
 _LOGIN_STATE_LOCK = threading.Lock()
 _LOGIN_COMPLETED_DATE = None
@@ -247,6 +247,15 @@ def exchange_and_store(code, state):
         raise RuntimeError(f"Upstox rejected token exchange ({code_text}).")
     access_token = str(payload.get("access_token", "")).strip()
     if not access_token:
+        errors = payload.get("errors") or []
+        first_error = errors[0] if errors and isinstance(errors[0], dict) else {}
+        code_text = str(first_error.get("errorCode") or first_error.get("error_code") or "none")
+        message_text = str(first_error.get("message") or "No error message was returned")
+        print(
+            f"Upstox token response had no access_token: HTTP {response.status_code}, "
+            f"{code_text}: {message_text}.",
+            flush=True,
+        )
         raise RuntimeError("Upstox token response did not contain an access token.")
 
     profile = requests.get(
@@ -286,6 +295,20 @@ def handle_callback(path):
         exchange_and_store(code, state)
     except SystemExit:
         return 409, "This server is not the active trading host. The token was not saved."
+    except ValueError:
+        print("Upstox OAuth callback failed: login state is invalid or expired.", flush=True)
+        return 400, "This login link has expired or is invalid. Use the latest Telegram login link."
+    except RuntimeError as exc:
+        # RuntimeError messages in this module contain only safe categories/codes, never secrets or tokens.
+        print(f"Upstox OAuth callback failed: {type(exc).__name__}: {exc}", flush=True)
+        return 400, "Upstox token approval failed or could not be saved. Check Render logs, then use the latest Telegram link."
+    except requests.RequestException as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        print(
+            f"Upstox OAuth callback request failed: {type(exc).__name__}; HTTP {status_code or 'unknown'}.",
+            flush=True,
+        )
+        return 400, "Upstox or Google Sheets request failed. Check Render logs, then use the latest Telegram link."
     except Exception as exc:
         print(f"Upstox OAuth callback failed: {type(exc).__name__}.", flush=True)
         return 400, "Login did not complete. Check server configuration, then request a fresh Telegram login link."
