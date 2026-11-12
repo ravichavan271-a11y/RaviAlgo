@@ -1,9 +1,9 @@
 RaviAlgo split-runner deployment
 
 Fixed assignment (India time, Monday-Friday)
-- 08:00 onward: Render sends the Upstox login link to Telegram every 30 minutes
-  (08:00, 08:30, 09:00, ... through 15:30 IST) until login succeeds. Each link
-  expires after 30 minutes; successful login saves the token to Dsheet!B1,
+- 08:30 IST: Render sends one Upstox login link to Telegram on weekdays. It
+  retries every 30 seconds only if Telegram delivery fails. The link expires
+  after 30 minutes; successful login saves the token to Dsheet!B1,
   invalidates outstanding links for the day, and stops further reminders.
 - After login, Render validates the callback and saves the access token to Dsheet!B1.
 - 09:01-15:45: Silly runs only Upstock5.py; Render runs only option_bot.py.

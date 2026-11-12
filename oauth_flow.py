@@ -35,9 +35,14 @@ def _get_sheet_client():
     ]
     env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
     if env_json:
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
-        return gspread.authorize(credentials)
+        try:
+            credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
+            return gspread.authorize(credentials)
+        except Exception as exc:
+            print(f"Google service-account environment JSON could not be loaded ({type(exc).__name__}).", flush=True)
 
+    checked_files = []
+    file_errors = []
     for path in (
         os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
         "creds.json",
@@ -48,11 +53,20 @@ def _get_sheet_client():
         "/etc/secrets/service_account.json",
     ):
         if path and os.path.isfile(path):
+            checked_files.append(os.path.basename(path))
             try:
                 credentials = ServiceAccountCredentials.from_json_keyfile_name(path, scope)
                 return gspread.authorize(credentials)
-            except Exception:
+            except Exception as exc:
+                file_errors.append(f"{os.path.basename(path)}:{type(exc).__name__}")
                 continue
+    if file_errors:
+        summary = ", ".join(dict.fromkeys(file_errors))
+        print(f"Google service-account file loading failed ({summary}). Check that the secret file is a valid service-account JSON key.", flush=True)
+        raise RuntimeError(f"Google service-account files could not be loaded ({summary}).")
+    if checked_files:
+        raise RuntimeError("Google service-account files were found but could not be initialized.")
+    print("Google service-account file not found; checked configured path, creds.json, and service_account.json.", flush=True)
     raise RuntimeError("Google service-account credentials are not configured.")
 
 
