@@ -40,6 +40,9 @@ def _get_sheet_client():
 
     for path in (
         os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
+        "creds.json",
+        "./creds.json",
+        "/etc/secrets/creds.json",
         "service_account.json",
         "./service_account.json",
         "/etc/secrets/service_account.json",
