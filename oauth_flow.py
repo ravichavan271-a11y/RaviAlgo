@@ -27,7 +27,7 @@ _LOGIN_CHECK_RESULT = False
 def _get_sheet_client():
     import json
     import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
+    from google.oauth2.service_account import Credentials
 
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -36,7 +36,7 @@ def _get_sheet_client():
     env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or os.environ.get("SERVICE_ACCOUNT_JSON", "")
     if env_json:
         try:
-            credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
+            credentials = Credentials.from_service_account_info(json.loads(env_json), scopes=scope)
             return gspread.authorize(credentials)
         except Exception as exc:
             print(f"Google service-account environment JSON could not be loaded ({type(exc).__name__}).", flush=True)
@@ -55,7 +55,7 @@ def _get_sheet_client():
         if path and os.path.isfile(path):
             checked_files.append(os.path.basename(path))
             try:
-                credentials = ServiceAccountCredentials.from_json_keyfile_name(path, scope)
+                credentials = Credentials.from_service_account_file(path, scopes=scope)
                 return gspread.authorize(credentials)
             except Exception as exc:
                 file_errors.append(f"{os.path.basename(path)}:{type(exc).__name__}")
