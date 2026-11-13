@@ -16,7 +16,7 @@ import requests
 AUTH_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 PROFILE_URL = "https://api.upstox.com/v2/user/profile"
-STATE_MAX_AGE_SECONDS = 30 * 60
+STATE_MAX_AGE_SECONDS = 15 * 60
 IST = ZoneInfo("Asia/Kolkata")
 _LOGIN_STATE_LOCK = threading.Lock()
 _LOGIN_COMPLETED_DATE = None
@@ -189,8 +189,8 @@ def send_login_reminder(runner_mode, scheduled_time):
         message = (
             f"{scheduled_time} IST: Log in to Upstox using the link below. After approval, "
             "the callback will save the new token to Dsheet!B1 automatically. "
-            "If you have not logged in yet, another link will arrive in 30 minutes. "
-            "Links expire after 30 minutes; successful login stops further reminders. "
+            "If you have not logged in yet, another link will arrive in 15 minutes. "
+            "Links expire after 15 minutes; successful login stops further reminders. "
             "The trading bots start at 09:01."
         )
     except Exception as exc:

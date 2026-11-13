@@ -15,8 +15,8 @@ from oauth_flow import build_login_url, handle_callback, login_completed_today, 
 
 
 IST = ZoneInfo("Asia/Kolkata")
-LOGIN_FIRST_AT = day_time(8, 30)
-LOGIN_LAST_AT = day_time(8, 30)
+LOGIN_FIRST_AT = day_time(8, 0)
+LOGIN_LAST_AT = day_time(15, 30)
 START_AT = day_time(9, 1)
 STOP_AT = day_time(15, 45)
 ROOT = Path(__file__).resolve().parent
@@ -93,9 +93,9 @@ def daily_scheduler():
             login_sent_slot = None
             login_retry_at = None
         if now.weekday() < 5:
-            # Send the daily login link at 08:30 IST; retry only if Telegram
-            # delivery fails. Do not send another link after successful delivery.
-            slot_minute = (now.minute // 30) * 30
+            # Send links every 15 minutes from 08:00 through the last market
+            # session slot until login succeeds. Retry sooner only on delivery failure.
+            slot_minute = (now.minute // 15) * 15
             login_slot = now.replace(minute=slot_minute, second=0, microsecond=0)
             if (
                 LOGIN_FIRST_AT <= login_slot.time() <= LOGIN_LAST_AT
