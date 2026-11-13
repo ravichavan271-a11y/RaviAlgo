@@ -1,0 +1,15 @@
+name: Keep Render awake for market session
+
+on:
+  schedule:
+    # GitHub cron uses UTC: 02:00-10:55 UTC is 07:30-16:25 IST.
+    - cron: "*/5 2-10 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  ping-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake the Render controller and keep it active
+        run: curl --fail --silent --show-error --retry 2 --retry-delay 5 --max-time 30 https://ravialgo.onrender.com/ping
