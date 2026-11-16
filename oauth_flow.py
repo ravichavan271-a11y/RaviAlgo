@@ -141,7 +141,18 @@ def write_access_token(access_token):
     """Save the verified token to Dsheet!B1 using the configured Google identity."""
     client = _get_sheet_client()
     spreadsheet = client.open(os.environ.get("TOKEN_SPREADSHEET_NAME", "Dsheet"))
-    spreadsheet.sheet1.update_acell("B1", access_token)
+    worksheet = spreadsheet.get_worksheet(0)
+    if worksheet is None:
+        raise RuntimeError("The token spreadsheet has no first worksheet.")
+    try:
+        worksheet.update_cell(1, 2, access_token)
+        saved_value = str(worksheet.cell(1, 2).value or "").strip()
+    except Exception as exc:
+        print(f"Google Sheets token write/readback failed: {type(exc).__name__}.", flush=True)
+        raise RuntimeError(f"Google Sheets token write/readback failed ({type(exc).__name__}).") from exc
+    if not hmac.compare_digest(saved_value, access_token):
+        raise RuntimeError("Google Sheets token write could not be verified in Dsheet!B1.")
+    print("Upstox access token saved and verified in Dsheet!B1.", flush=True)
 
 
 def build_login_url():
