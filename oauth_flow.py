@@ -153,8 +153,9 @@ def _mark_login_completed():
 
 
 def _client_id():
-    # Support both the names in the deploy package and Render's existing env names.
-    return (os.environ.get("UPSTOX_CLIENT_ID", "") or os.environ.get("UPSTOX_API_KEY", "")).strip()
+    # Upstox OAuth's client_id is the Developer App API key, not the user's UCC.
+    # Prefer the explicit API-key setting if both legacy names are configured.
+    return (os.environ.get("UPSTOX_API_KEY", "") or os.environ.get("UPSTOX_CLIENT_ID", "")).strip()
 
 
 def _client_secret():
