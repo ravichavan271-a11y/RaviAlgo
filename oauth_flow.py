@@ -28,6 +28,7 @@ def _get_sheet_client():
     import json
     import gspread
     from google.oauth2.service_account import Credentials
+    from oauth2client.service_account import ServiceAccountCredentials
 
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -39,7 +40,25 @@ def _get_sheet_client():
             credentials = Credentials.from_service_account_info(json.loads(env_json), scopes=scope)
             return gspread.authorize(credentials)
         except Exception as exc:
-            print(f"Google service-account environment JSON could not be loaded ({type(exc).__name__}).", flush=True)
+            # The legacy oauth2client flow is already used by option_bot.py in
+            # this deployment. Keep it as a compatibility fallback for the
+            # OAuth callback if google-auth/gspread raises a runtime error.
+            try:
+                credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(env_json), scope)
+                client = gspread.authorize(credentials)
+                print("Google service-account environment JSON loaded via oauth2client fallback.", flush=True)
+                return client
+            except Exception as fallback_exc:
+                detail = getattr(exc, "name", None) if isinstance(exc, AttributeError) else None
+                fallback_detail = getattr(fallback_exc, "name", None) if isinstance(fallback_exc, AttributeError) else None
+                suffix = f", missing attribute: {detail}" if detail else ""
+                fallback_suffix = f", missing attribute: {fallback_detail}" if fallback_detail else ""
+                print(
+                    "Google service-account environment JSON could not be loaded "
+                    f"({type(exc).__name__}{suffix}; oauth2client fallback "
+                    f"{type(fallback_exc).__name__}{fallback_suffix}).",
+                    flush=True,
+                )
 
     checked_files = []
     file_errors = []
@@ -58,8 +77,24 @@ def _get_sheet_client():
                 credentials = Credentials.from_service_account_file(path, scopes=scope)
                 return gspread.authorize(credentials)
             except Exception as exc:
-                file_errors.append(f"{os.path.basename(path)}:{type(exc).__name__}")
-                continue
+                first_detail = getattr(exc, "name", None) if isinstance(exc, AttributeError) else None
+                try:
+                    credentials = ServiceAccountCredentials.from_json_keyfile_name(path, scope)
+                    client = gspread.authorize(credentials)
+                    print(
+                        f"Google service-account file {os.path.basename(path)} loaded via oauth2client fallback.",
+                        flush=True,
+                    )
+                    return client
+                except Exception as fallback_exc:
+                    fallback_detail = getattr(fallback_exc, "name", None) if isinstance(fallback_exc, AttributeError) else None
+                    detail_text = f" (missing attribute: {first_detail})" if first_detail else ""
+                    fallback_text = f"; fallback missing attribute: {fallback_detail}" if fallback_detail else ""
+                    file_errors.append(
+                        f"{os.path.basename(path)}:{type(exc).__name__}{detail_text}/"
+                        f"{type(fallback_exc).__name__}{fallback_text}"
+                    )
+                    continue
     if file_errors:
         summary = ", ".join(dict.fromkeys(file_errors))
         print(f"Google service-account file loading failed ({summary}). Check that the secret file is a valid service-account JSON key.", flush=True)
